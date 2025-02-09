@@ -2,7 +2,7 @@ from typing import Tuple
 import torch.nn as nn
 
 from .quant import VectorQuantizer2
-from .var import VAR
+from .var import VAR, SDVAR
 from .vqvae import VQVAE
 
 
@@ -49,7 +49,8 @@ def build_vae_var_speculative_decoding(
     # VAR args
     num_classes=1000, depth_draft=16, depth_target=30, shared_aln=False, attn_l2_norm=True,
     flash_if_available=True, fused_if_available=True,
-    init_adaln=0.5, init_adaln_gamma=1e-5, init_head=0.02, init_std=-1,    # init_std < 0: automated
+    init_adaln=0.5, init_adaln_gamma=1e-5, init_head=0.02, init_std=-1, # init_std < 0: automated
+    similarity_thresh=0.8, draft_steps = 2
 ) -> Tuple[VQVAE, VAR]:
     
     # disable built-in initialization for speed
@@ -85,5 +86,5 @@ def build_vae_var_speculative_decoding(
         flash_if_available=flash_if_available, fused_if_available=fused_if_available,
     ).to(device)
     var_target.init_weights(init_adaln=init_adaln, init_adaln_gamma=init_adaln_gamma, init_head=init_head, init_std=init_std)
-    
-    return vae_local, var_draft, var_target
+    var_sd = SDVAR(var_draft, var_target, similarity_thresh, draft_steps)
+    return vae_local, var_draft, var_target, var_sd

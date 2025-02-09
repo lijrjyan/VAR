@@ -123,23 +123,6 @@ class VAR(nn.Module):
             h = h_or_h_and_residual
         return self.head(self.head_nm(h.float(), cond_BD).float()).float()
     
-    def get_all_logits(self, h_or_h_and_residual: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]], 
-                cond_BD: Optional[torch.Tensor],
-                prefix_len: Optional[int] = None):  # 添加prefix_len参数
-        if not isinstance(h_or_h_and_residual, torch.Tensor):
-            h, resi = h_or_h_and_residual
-            h = resi + self.blocks[-1].drop_path(h)
-        else:
-            h = h_or_h_and_residual
-            
-        # 获取所有位置的logits
-        all_logits = self.head(self.head_nm(h.float(), cond_BD).float()).float()
-        
-        # 如果指定了prefix_len,则返回prefix部分的logits
-        if prefix_len is not None:
-            return all_logits[:, :prefix_len], all_logits[:, prefix_len:]
-        return all_logits
-        
     @torch.no_grad()
     def autoregressive_infer_cfg(
         self, B: int, label_B: Optional[Union[int, torch.LongTensor]],
@@ -185,7 +168,7 @@ class VAR(nn.Module):
             for b in self.blocks:
                 x = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
             logits_BlV = self.get_logits(x, cond_BD)
-            
+                
             t = cfg * ratio
             logits_BlV = (1+t) * logits_BlV[:B] - t * logits_BlV[B:]
             
@@ -333,15 +316,14 @@ class SDVAR(nn.Module):
         self,
         draft_model,
         target_model,
-        similarity_thresh: float = 0.8
+        similarity_thresh: float = 0.8,
+        draft_steps: int = 2,
     ):
-        # draft_model和target_model应该在同一个设备上
-        assert draft_model.device == target_model.device
-
         super().__init__()
         self.draft_model = draft_model
         self.target_model = target_model
         self.similarity_thresh = similarity_thresh
+        self.draft_steps = draft_steps
 
     @torch.no_grad()
     def sdvar_autoregressive_infer_cfg(
@@ -353,26 +335,7 @@ class SDVAR(nn.Module):
         top_k: int = 0,
         top_p: float = 0.0,
         more_smooth: bool = False,
-        gamma: int = 4,
-        warmup_steps: int =4
     ) -> torch.Tensor:
-        """
-        only used for inference, on autoregressive mode
-        :param B: batch size
-        :param label_B: imagenet label; if None, randomly sampled
-        :param g_seed: random seed
-        :param cfg: classifier-free guidance ratio
-        这里可以考虑top_k, top_p是否需要将target_model和draft_model分开，这样可以更加有效？
-        :param top_k: top-k sampling
-        :param top_p: top-p sampling
-        :param more_smooth: smoothing the pred using gumbel softmax; only used in visualization, not used in FID/IS benchmarking
-        :param gamma: draft_model 每次向前预测的数量
-        :param warmup_steps: 参照code表示最开始目标模型预测的数量
-        :return: if returns_vemb: list of embedding h_BChw := vae_embed(idx_Bl), else: list of idx_Bl
-        """
-        
-        # 初始化一些列内容，不用理
-        
         if g_seed is not None:
             self.draft_model.rng.manual_seed(g_seed)
             self.target_model.rng.manual_seed(g_seed)
@@ -409,121 +372,11 @@ class SDVAR(nn.Module):
 
         si = 0
         cur_L = 0
-        current_stages = 0
         total_stages = len(self.draft_model.patch_nums)
 
-        # 这里可以按照code的方式来进行初始化
+        while si < total_stages:
+            draft_count = min(self.draft_steps, total_stages - si)
 
-        while current_stages < total_stages:
-            accepted_count = 0
-            draft_steps = min(gamma, total_stages - si)
-
-            # 小模型生成draft_steps步的内容
-            # 这里是draft_model使用最开始的token_map使用生成向后draft_steps层的预测
-            # 按照llm_fast_infer的方法应该是要有一个用前缀生成n步的generate函数，这里可以按照常规的code里边对arinference的修改进行调整,额外需要注意的是他需要的是logits而不是原来的图片
-            for step_i in range(draft_steps):
-                pn = self.draft_model.patch_nums[local_si]
-                ratio = (
-                    local_si / self.draft_model.num_stages_minus_1
-                    if self.draft_model.num_stages_minus_1 > 0 else 0
-                )
-                local_cur_L_next = local_cur_L + pn*pn
-
-                cond_BD_or_gss = self.draft_model.shared_ada_lin(sos)
-                x = local_map
-                for blk in self.draft_model.blocks:
-                    x = blk(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
-                logits_draft = self.draft_model.get_logits(x, sos)
-
-                t = cfg * ratio
-                logits_draft = (1+t)*logits_draft[:B] - t*logits_draft[B:]  # (B, l, V)
-
-                idx_Bl = sample_with_top_k_top_p_(
-                    logits_draft, rng=rng, top_k=top_k, top_p=top_p, num_samples=1
-                )[:, :, 0]
-
-                if not more_smooth:
-                    emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(idx_Bl)
-                else:
-                    emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(idx_Bl)
-                h_BChw = emb_BlC.transpose(1,2).reshape(B, self.draft_model.Cvae, pn, pn)
-                local_f_hat, local_map = self.draft_model.vae_quant_proxy[0].get_next_autoregressive_input(
-                    local_si, total_stages, local_f_hat, h_BChw
-                )
-
-                if local_si != (total_stages-1):
-                    next_pn = self.draft_model.patch_nums[local_si+1]
-                    local_map = local_map.view(B, self.draft_model.Cvae, -1).transpose(1,2)
-                    local_map = (
-                        self.draft_model.word_embed(local_map)
-                        + lvl_pos[:, local_cur_L_next : local_cur_L_next + next_pn*next_pn]
-                    )
-                    local_map = local_map.repeat(2,1,1)
-
-                
-                # expansions.append({
-                #     'si': local_si,
-                #     'pn': pn,
-                #     'cur_L': local_cur_L,
-                #     'cur_L_next': local_cur_L_next,
-                #     'idx_Bl': idx_Bl,
-                #     'emb_BlC': emb_BlC,
-                #     'ratio': ratio,
-                #     'f_hat': local_f_hat.clone(),
-                #     'next_map': local_map.clone(),
-                # })
-
-                # local_si += 1
-                # local_cur_L = local_cur_L_next
-                # f_hat = local_f_hat
-                # next_token_map = local_map
-
-                # if local_si >= total_stages:
-                #     break
-
-            # 大模型一次性验证
-            # arinference需要额外添加的参数，首先是prefix表示当前已经生成的
-            for step_i in range(draft_steps):
-                pn = self.draft_model.patch_nums[local_si]
-                ratio = (
-                    local_si / self.draft_model.num_stages_minus_1
-                    if self.draft_model.num_stages_minus_1 > 0 else 0
-                )
-                local_cur_L_next = local_cur_L + pn*pn
-
-                cond_BD_or_gss = self.draft_model.shared_ada_lin(sos)
-                x = local_map
-                for blk in self.draft_model.blocks:
-                    x = blk(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
-                logits_draft = self.draft_model.get_logits(x, sos)
-
-                t = cfg * ratio
-                logits_draft = (1+t)*logits_draft[:B] - t*logits_draft[B:]  # (B, l, V)
-
-                idx_Bl = sample_with_top_k_top_p_(
-                    logits_draft, rng=rng, top_k=top_k, top_p=top_p, num_samples=1
-                )[:, :, 0]
-
-                if not more_smooth:
-                    emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(idx_Bl)
-                else:
-                    emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(idx_Bl)
-                h_BChw = emb_BlC.transpose(1,2).reshape(B, self.draft_model.Cvae, pn, pn)
-                local_f_hat, local_map = self.draft_model.vae_quant_proxy[0].get_next_autoregressive_input(
-                    local_si, total_stages, local_f_hat, h_BChw
-                )
-
-                if local_si != (total_stages-1):
-                    next_pn = self.draft_model.patch_nums[local_si+1]
-                    local_map = local_map.view(B, self.draft_model.Cvae, -1).transpose(1,2)
-                    local_map = (
-                        self.draft_model.word_embed(local_map)
-                        + lvl_pos[:, local_cur_L_next : local_cur_L_next + next_pn*next_pn]
-                    )
-                    local_map = local_map.repeat(2,1,1)
-
-
-            # 这里是target_model使用draft_model生成的内容生成下一层的预测
             expansions = []
             backup_f_hat = f_hat.clone()
             backup_next_map = next_token_map.clone()
@@ -534,7 +387,64 @@ class SDVAR(nn.Module):
             local_map = next_token_map
             local_cur_L = cur_L
 
+            for step_i in range(draft_count):
+                pn = self.draft_model.patch_nums[local_si]
+                ratio = (
+                    local_si / self.draft_model.num_stages_minus_1
+                    if self.draft_model.num_stages_minus_1 > 0 else 0
+                )
+                local_cur_L_next = local_cur_L + pn*pn
 
+                cond_BD_or_gss = self.draft_model.shared_ada_lin(sos)
+                x = local_map
+                for blk in self.draft_model.blocks:
+                    x = blk(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
+                logits_draft = self.draft_model.get_logits(x, sos)
+
+                t = cfg * ratio
+                logits_draft = (1+t)*logits_draft[:B] - t*logits_draft[B:]  # (B, l, V)
+
+                idx_Bl = sample_with_top_k_top_p_(
+                    logits_draft, rng=rng, top_k=top_k, top_p=top_p, num_samples=1
+                )[:, :, 0]
+
+                if not more_smooth:
+                    emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(idx_Bl)
+                else:
+                    emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(idx_Bl)
+                h_BChw = emb_BlC.transpose(1,2).reshape(B, self.draft_model.Cvae, pn, pn)
+                local_f_hat, local_map = self.draft_model.vae_quant_proxy[0].get_next_autoregressive_input(
+                    local_si, total_stages, local_f_hat, h_BChw
+                )
+
+                if local_si != (total_stages-1):
+                    next_pn = self.draft_model.patch_nums[local_si+1]
+                    local_map = local_map.view(B, self.draft_model.Cvae, -1).transpose(1,2)
+                    local_map = (
+                        self.draft_model.word_embed(local_map)
+                        + lvl_pos[:, local_cur_L_next : local_cur_L_next + next_pn*next_pn]
+                    )
+                    local_map = local_map.repeat(2,1,1)
+
+                expansions.append({
+                    'si': local_si,
+                    'pn': pn,
+                    'cur_L': local_cur_L,
+                    'cur_L_next': local_cur_L_next,
+                    'idx_Bl': idx_Bl,
+                    'emb_BlC': emb_BlC,
+                    'ratio': ratio,
+                    'f_hat': local_f_hat.clone(),
+                    'next_map': local_map.clone(),
+                })
+
+                local_si += 1
+                local_cur_L = local_cur_L_next
+                f_hat = local_f_hat
+                next_token_map = local_map
+
+                if local_si >= total_stages:
+                    break
 
 def measure_similarity_with_target_parallel(
     expansions,

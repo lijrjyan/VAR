@@ -20,7 +20,7 @@ def sample_with_top_k_top_p_(logits_BlV: torch.Tensor, top_k: int = 0, top_p: fl
 
 
 def gumbel_softmax_with_rng(logits: torch.Tensor, tau: float = 1, hard: bool = False, eps: float = 1e-10, dim: int = -1, rng: torch.Generator = None) -> torch.Tensor:
-    if rng is None:
+    if rng is None: 
         return F.gumbel_softmax(logits=logits, tau=tau, hard=hard, eps=eps, dim=dim)
     
     gumbels = (-torch.empty_like(logits, memory_format=torch.legacy_contiguous_format).exponential_(generator=rng).log())
