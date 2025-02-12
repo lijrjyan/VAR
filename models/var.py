@@ -502,7 +502,7 @@ class SDVAR(nn.Module):
 
         # 接受之前生成的做为target_model输出的prefix
         target_next_token_map = token_hub
-        target_next_token_map = self.word_embed(target_next_token_map) + lvl_pos[:,1:pindex]   
+        target_next_token_map = self.target_model.word_embed(target_next_token_map) + lvl_pos[:,1:pindex]   
         target_next_token_map = target_next_token_map.repeat(2, 1, 1)   # double the batch sizes due to CFG
         target_next_token_map = torch.cat([first_token_map,target_next_token_map],dim=1)
 
