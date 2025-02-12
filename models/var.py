@@ -429,7 +429,7 @@ class SDVAR(nn.Module):
         # 按照llm_fast_infer的方法应该是要有一个用前缀生成n步的generate函数，这里可以按照常规的code里边对arinference的修改进行调整,额外需要注意的是他需要的是logits而不是原来的图片
         for si, pn in enumerate(self.patch_nums):
             # len(self.patch_nums)-1是最后一层，
-            if si == len(self.patch_nums)-2:
+            if si == len(self.patch_nums)-1:
                 break
 
             ratio = (
