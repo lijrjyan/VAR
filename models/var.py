@@ -340,6 +340,7 @@ class SDVAR(nn.Module):
         self.draft_model = draft_model
         self.target_model = target_model
         self.similarity_thresh = similarity_thresh
+        
 
     # 这是一个最简单的内容，用draft_model生成除了最后一层以外的全部内容，然后用target_model生成最后一层的内容
     # 总体内容按照code的方式进行完成
@@ -415,7 +416,7 @@ class SDVAR(nn.Module):
 ###### 小模型生成除最后一层以外的全部内容
         draft_cur_L = 0
         draft_cond_BD_or_gss = self.draft_model.shared_ada_lin(sos)
-        total_stages = len(self.patch_num)
+        total_stages = len(self.patch_nums)
         
         token_hub =[]
 
