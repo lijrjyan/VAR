@@ -343,8 +343,10 @@ class SDVAR(nn.Module):
         self.target_model = target_model
         self.similarity_thresh = similarity_thresh
 
+    # 这是一个最简单的内容，用draft_model生成除了最后一层以外的全部内容，然后用target_model生成最后一层的内容
+    # 总体内容按照code的方式进行完成
     @torch.no_grad()
-    def sdvar_autoregressive_infer_cfg(
+    def sdvar_autoregressive_infer_cfg_lastWithTarget(
         self,
         B: int,
         label_B: Optional[Union[int, torch.LongTensor]],
@@ -371,8 +373,8 @@ class SDVAR(nn.Module):
         :return: if returns_vemb: list of embedding h_BChw := vae_embed(idx_Bl), else: list of idx_Bl
         """
         
-        # 初始化一些列内容，不用理
-        
+###### 初始化参数
+
         if g_seed is not None:
             self.draft_model.rng.manual_seed(g_seed)
             self.target_model.rng.manual_seed(g_seed)
@@ -390,10 +392,11 @@ class SDVAR(nn.Module):
                 fill_value=self.draft_model.num_classes if label_B < 0 else label_B,
                 device=self.draft_model.lvl_1L.device
             )
-
-        sos = self.draft_model.class_emb(
-            torch.cat((label_B, torch.full_like(label_B, fill_value=self.draft_model.num_classes)), dim=0)
-        )   # shape: (2B, C)
+        # sos = self.draft_model.class_emb(
+        #     torch.cat((label_B, torch.full_like(label_B, fill_value=self.draft_model.num_classes)), dim=0)
+        # )   # shape: (2B, C)
+        sos = cond_BD = self.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.num_classes)), dim=0))
+        # 原来是sos = cond_BD但是我不知道是为了什么
         lvl_pos = self.draft_model.lvl_embed(self.draft_model.lvl_1L) + self.draft_model.pos_1LC
         next_token_map = (
             sos.unsqueeze(1).expand(2*B, self.draft_model.first_l, -1)
@@ -401,138 +404,277 @@ class SDVAR(nn.Module):
             + lvl_pos[:, :self.draft_model.first_l]
         )
         f_hat = sos.new_zeros(B, self.draft_model.Cvae, self.draft_model.patch_nums[-1], self.draft_model.patch_nums[-1])
+        
+        # 我们实际上要确保两个model的尺度数量一致，确保后提取出来方便使用
+        assert self.draft_model.patch_nums == self.target_model.patch_nums
+        assert self.draft_model.num_stages_minus_1 == self.target_model.num_stages_minus_1
+        self.patch_nums = self.draft_model.patch_nums
+        self.num_stages_minus_1 = self.draft_model.num_stages_minus_1
+        
+        # 实际上draft_model和target_model使用的是同一个vae，而且似乎vae不会影响其他内容，是可以公用的？
+        # sos和cond_BD在整个生成过程中发生改变了吗？是可以公用的吗？
 
+###### 小模型生成除最后一层以外的全部内容
+        draft_cur_L = 0
+        draft_cond_BD_or_gss = self.draft_model.shared_ada_lin(sos)
+        total_stages = len(self.patch_num)
+        
+        token_hub =[]
+
+        # 先做一个简易版本，通过draft_model生成出了最后一层以外的所有层数，然后接着让target_model生成最后已成
         for blk in self.draft_model.blocks:
             blk.attn.kv_caching(True)
+
+        # 小模型生成draft_steps步的内容
+        # 这里是draft_model使用最开始的token_map使用生成向后draft_steps层的预测
+        # 按照llm_fast_infer的方法应该是要有一个用前缀生成n步的generate函数，这里可以按照常规的code里边对arinference的修改进行调整,额外需要注意的是他需要的是logits而不是原来的图片
+        for si, pn in enumerate(self.patch_nums):
+            # len(self.patch_nums)-1是最后一层，
+            if si == len(self.patch_nums)-2:
+                break
+
+            ratio = (
+                si / self.num_stages_minus_1
+                if self.num_stages_minus_1 > 0 else 0
+            )
+            draft_cur_L = draft_cur_L+ pn*pn
+            # cond_BD_or_gss = self.draft_model.shared_ada_lin(sos)  # 平常是在循环外的，我也不知道为什么会出现在这里，但是似乎sos在循环过程中没有改变，是不是无所谓？
+            x = next_token_map # x = local_map
+
+            for blk in self.draft_model.blocks:
+                x = blk(x=x, cond_BD=draft_cond_BD_or_gss, attn_bias=None)
+            # logits_draft = self.draft_model.get_logits(x, sos) # 原来是是get_logits(x, cond_BD)为什么会变成sos呢？
+            logits_draft = self.draft_model.get_logits(x, cond_BD)
+            
+            
+            t = cfg * ratio
+            logits_draft = (1+t)*logits_draft[:B] - t*logits_draft[B:]  # (B, l, V)
+
+            idx_Bl = sample_with_top_k_top_p_(
+                logits_draft, rng=rng, top_k=top_k, top_p=top_p, num_samples=1
+            )[:, :, 0]
+
+            if not more_smooth:
+                emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(idx_Bl)
+            else:
+                emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(idx_Bl)
+            
+            h_BChw = emb_BlC.transpose(1,2).reshape(B, self.draft_model.Cvae, pn, pn)
+
+            draft_f_hat, next_token_map = self.draft_model.vae_quant_proxy[0].get_next_autoregressive_input(
+                si, total_stages, draft_f_hat, h_BChw
+            )
+
+            # prepare for next stage
+            # 由于这个不会运行到最后所以不需要做检查了
+            next_pn = self.patch_nums[si+1]
+            next_token_map = next_token_map.view(B, self.draft_model.Cvae, -1).transpose(1,2)
+            token_hub.append(next_token_map)
+            next_token_map = (
+                self.draft_model.word_embed(next_token_map)
+                + lvl_pos[:, draft_cur_L : draft_cur_L + next_pn*next_pn]
+            )
+            next_token_map = next_token_map.repeat(2,1,1)
+        
+        token_hub = torch.cat(token_hub, dim = 1)
+
+        # draft模型生成完毕        
+        for blk in self.draft_model.blocks:
+            blk.attn.kv_caching(False)
+    
+###### target模型接受draft模型生成的内容然后生成最后一层的内容
         for blk in self.target_model.blocks:
             blk.attn.kv_caching(True)
+        
 
-        si = 0
-        cur_L = 0
-        current_stages = 0
-        total_stages = len(self.draft_model.patch_nums)
+        sos = cond_BD = self.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.num_classes)), dim=0))
+        lvl_pos = self.target_model.lvl_embed(self.target_model.lvl_1L) + self.target_model.pos_1LC
+        # 这里存在疑惑，为什么我们需要生成一个first_token_map呢？难道说之前token_map不包括在里边吗？但似乎我们每次预测和保存的都是next_token_map而不是当前层的，这可能是其中的一个原因。
+        first_token_map = sos.unsqueeze(1).expand(2 * B, self.first_l, -1) + self.pos_start.expand(2 * B, self.first_l, -1) + lvl_pos[:, :self.first_l]
 
-        # 这里可以按照code的方式来进行初始化
+        # exit_points表示的是之前已经有的长度，我们应该是可以简化的 
+        exit_points = [1,5,14,30,55,91,155,255,424,680]
+        # 我们这里只需要target_model生成最后一层的内容所以我们这里设置成9
+        # entry_num表示需要多少
+        entry_num = 9
+        pindex = exit_points[entry_num]
 
-        while current_stages < total_stages:
-            accepted_count = 0
-            draft_steps = min(gamma, total_stages - si)
+        # 接受之前生成的做为target_model输出的prefix
+        target_next_token_map = token_hub
+        target_next_token_map = self.word_embed(target_next_token_map) + lvl_pos[:,1:pindex]   
+        target_next_token_map = target_next_token_map.repeat(2, 1, 1)   # double the batch sizes due to CFG
+        target_next_token_map = torch.cat([first_token_map,target_next_token_map],dim=1)
 
-            # 小模型生成draft_steps步的内容
-            # 这里是draft_model使用最开始的token_map使用生成向后draft_steps层的预测
-            # 按照llm_fast_infer的方法应该是要有一个用前缀生成n步的generate函数，这里可以按照常规的code里边对arinference的修改进行调整,额外需要注意的是他需要的是logits而不是原来的图片
-            for step_i in range(draft_steps):
-                pn = self.draft_model.patch_nums[local_si]
-                ratio = (
-                    local_si / self.draft_model.num_stages_minus_1
-                    if self.draft_model.num_stages_minus_1 > 0 else 0
-                )
-                local_cur_L_next = local_cur_L + pn*pn
+        attn_bias = self.attn_bias_for_masking[:,:,0:pindex,0:pindex]
 
-                cond_BD_or_gss = self.draft_model.shared_ada_lin(sos)
-                x = local_map
-                for blk in self.draft_model.blocks:
-                    x = blk(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
-                logits_draft = self.draft_model.get_logits(x, sos)
+        cond_BD_or_gss = self.shared_ada_lin(cond_BD)
+        
+        target_cur_L = 0
+        
+        for si, pn in enumerate(self.patch_nums):   # si: i-th segment
+            target_cur_L += pn*pn
+            if si>entry_num:
+                break
+            if si<entry_num:
+                continue
+            x = next_token_map
+            AdaLNSelfAttn.forward
+            if si == entry_num:
+                for b in self.target_model.blocks:
+                    x = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=attn_bias)
+            elif si > entry_num:
+                for b in self.target_model.blocks:
+                    x = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
+            
+            logits_BlV = self.target_model.get_logits(x, cond_BD)
 
-                t = cfg * ratio
-                logits_draft = (1+t)*logits_draft[:B] - t*logits_draft[B:]  # (B, l, V)
+            if si == entry_num:
+                ratio = si / self.num_stages_minus_1
+                t = cfg * ratio 
+                logits_BlV[:B,target_cur_L-pn*pn:target_cur_L] = (1+t) * logits_BlV[:B,target_cur_L-pn*pn:target_cur_L] - t * logits_BlV[B:,target_cur_L-pn*pn:target_cur_L]
 
-                idx_Bl = sample_with_top_k_top_p_(
-                    logits_draft, rng=rng, top_k=top_k, top_p=top_p, num_samples=1
-                )[:, :, 0]
 
-                if not more_smooth:
-                    emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(idx_Bl)
-                else:
-                    emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(idx_Bl)
-                h_BChw = emb_BlC.transpose(1,2).reshape(B, self.draft_model.Cvae, pn, pn)
-                local_f_hat, local_map = self.draft_model.vae_quant_proxy[0].get_next_autoregressive_input(
-                    local_si, total_stages, local_f_hat, h_BChw
-                )
-
-                if local_si != (total_stages-1):
-                    next_pn = self.draft_model.patch_nums[local_si+1]
-                    local_map = local_map.view(B, self.draft_model.Cvae, -1).transpose(1,2)
-                    local_map = (
-                        self.draft_model.word_embed(local_map)
-                        + lvl_pos[:, local_cur_L_next : local_cur_L_next + next_pn*next_pn]
-                    )
-                    local_map = local_map.repeat(2,1,1)
+                new_L = 0
+                for a, b in enumerate(self.patch_nums[0:entry_num+1]):
+                    idx_Bl=sample_with_top_k_top_p_(logits_BlV[:B,new_L:new_L + self.patch_nums[a] ** 2], rng=rng, top_k=top_k[a], top_p=top_p, num_samples=1)[:, :, 0]
+                    new_L += b*b
 
                 
-                # expansions.append({
-                #     'si': local_si,
-                #     'pn': pn,
-                #     'cur_L': local_cur_L,
-                #     'cur_L_next': local_cur_L_next,
-                #     'idx_Bl': idx_Bl,
-                #     'emb_BlC': emb_BlC,
-                #     'ratio': ratio,
-                #     'f_hat': local_f_hat.clone(),
-                #     'next_map': local_map.clone(),
-                # })
-
-                # local_si += 1
-                # local_cur_L = local_cur_L_next
-                # f_hat = local_f_hat
-                # next_token_map = local_map
-
-                # if local_si >= total_stages:
-                #     break
-
-            # 大模型一次性验证
-            # arinference需要额外添加的参数，首先是prefix表示当前已经生成的
-            for step_i in range(draft_steps):
-                pn = self.draft_model.patch_nums[local_si]
-                ratio = (
-                    local_si / self.draft_model.num_stages_minus_1
-                    if self.draft_model.num_stages_minus_1 > 0 else 0
-                )
-                local_cur_L_next = local_cur_L + pn*pn
-
-                cond_BD_or_gss = self.draft_model.shared_ada_lin(sos)
-                x = local_map
-                for blk in self.draft_model.blocks:
-                    x = blk(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
-                logits_draft = self.draft_model.get_logits(x, sos)
-
+            elif si > entry_num:
+                ratio = si / self.num_stages_minus_1
                 t = cfg * ratio
-                logits_draft = (1+t)*logits_draft[:B] - t*logits_draft[B:]  # (B, l, V)
-
-                idx_Bl = sample_with_top_k_top_p_(
-                    logits_draft, rng=rng, top_k=top_k, top_p=top_p, num_samples=1
-                )[:, :, 0]
-
-                if not more_smooth:
-                    emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(idx_Bl)
-                else:
-                    emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(idx_Bl)
-                h_BChw = emb_BlC.transpose(1,2).reshape(B, self.draft_model.Cvae, pn, pn)
-                local_f_hat, local_map = self.draft_model.vae_quant_proxy[0].get_next_autoregressive_input(
-                    local_si, total_stages, local_f_hat, h_BChw
-                )
-
-                if local_si != (total_stages-1):
-                    next_pn = self.draft_model.patch_nums[local_si+1]
-                    local_map = local_map.view(B, self.draft_model.Cvae, -1).transpose(1,2)
-                    local_map = (
-                        self.draft_model.word_embed(local_map)
-                        + lvl_pos[:, local_cur_L_next : local_cur_L_next + next_pn*next_pn]
-                    )
-                    local_map = local_map.repeat(2,1,1)
+                logits_BlV = (1+t) * logits_BlV[:B] - t * logits_BlV[B:]
+                idx_Bl = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k[si], top_p=top_p, num_samples=1)[:, :, 0]
 
 
-            # 这里是target_model使用draft_model生成的内容生成下一层的预测
-            expansions = []
-            backup_f_hat = f_hat.clone()
-            backup_next_map = next_token_map.clone()
-            backup_cur_L = cur_L
+            if not more_smooth: # this is the default case
+                h_BChw = self.target_model.vae_quant_proxy[0].embedding(idx_Bl)   # B, l, Cvae
+            else:   # not used when evaluating FID/IS/Precision/Recall
+                gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)   # refer to mask-git
+                h_BChw = gumbel_softmax_with_rng(logits_BlV.mul(1 + ratio), tau=gum_t, hard=False, dim=-1, rng=rng) @ self.target_model.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
 
-            local_si = si
-            local_f_hat = f_hat
-            local_map = next_token_map
-            local_cur_L = cur_L
+            h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.Cvae, pn, pn)
+
+            f_hat, next_token_map = self.target_model.vae_quant_proxy[0].get_next_autoregressive_input(si, len(self.patch_nums), f_hat, h_BChw)
+            
+            if si != self.num_stages_minus_1:   # prepare for next stage
+                next_token_map = next_token_map.view(B, self.target_model.Cvae, -1).transpose(1, 2)
+                token_hub = torch.cat([token_hub,next_token_map],dim=1)
+                next_token_map = self.word_embed(next_token_map) + lvl_pos[:, target_cur_L:target_cur_L + self.patch_nums[si+1] ** 2]
+                next_token_map = next_token_map.repeat(2, 1, 1)   # double the batch sizes due to CFG
+            
+        # target模型生成完成
+        for blk in self.target_model.blocks:
+            blk.attn.kv_caching(False)   
+                    
+        return f_hat, token_hub   # de-normalize, from [-1, 1] to [0, 1]
+
+
+
+        
+### 复杂版本
+        # # 这里可以按照code的方式来进行初始化
+
+        # while current_stages < total_stages:
+        #     accepted_count = 0
+        #     draft_steps = min(gamma, total_stages - si)
+
+        #     # 小模型生成draft_steps步的内容
+        #     # 这里是draft_model使用最开始的token_map使用生成向后draft_steps层的预测
+        #     # 按照llm_fast_infer的方法应该是要有一个用前缀生成n步的generate函数，这里可以按照常规的code里边对arinference的修改进行调整,额外需要注意的是他需要的是logits而不是原来的图片
+        #     for step_i in range(draft_steps):
+        #         pn = self.draft_model.patch_nums[local_si]
+        #         ratio = (
+        #             local_si / self.draft_model.num_stages_minus_1
+        #             if self.draft_model.num_stages_minus_1 > 0 else 0
+        #         )
+        #         local_cur_L_next = local_cur_L + pn*pn
+
+        #         cond_BD_or_gss = self.draft_model.shared_ada_lin(sos)
+        #         x = local_map
+        #         for blk in self.draft_model.blocks:
+        #             x = blk(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
+        #         logits_draft = self.draft_model.get_logits(x, sos)
+
+        #         t = cfg * ratio
+        #         logits_draft = (1+t)*logits_draft[:B] - t*logits_draft[B:]  # (B, l, V)
+
+        #         idx_Bl = sample_with_top_k_top_p_(
+        #             logits_draft, rng=rng, top_k=top_k, top_p=top_p, num_samples=1
+        #         )[:, :, 0]
+
+        #         if not more_smooth:
+        #             emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(idx_Bl)
+        #         else:
+        #             emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(idx_Bl)
+        #         h_BChw = emb_BlC.transpose(1,2).reshape(B, self.draft_model.Cvae, pn, pn)
+        #         local_f_hat, local_map = self.draft_model.vae_quant_proxy[0].get_next_autoregressive_input(
+        #             local_si, total_stages, local_f_hat, h_BChw
+        #         )
+
+        #         if local_si != (total_stages-1):
+        #             next_pn = self.draft_model.patch_nums[local_si+1]
+        #             local_map = local_map.view(B, self.draft_model.Cvae, -1).transpose(1,2)
+        #             local_map = (
+        #                 self.draft_model.word_embed(local_map)
+        #                 + lvl_pos[:, local_cur_L_next : local_cur_L_next + next_pn*next_pn]
+        #             )
+        #             local_map = local_map.repeat(2,1,1)
+
+                
+
+        #     # 大模型一次性验证
+        #     # arinference需要额外添加的参数，首先是prefix表示当前已经生成的
+        #     for step_i in range(draft_steps):
+        #         pn = self.draft_model.patch_nums[local_si]
+        #         ratio = (
+        #             local_si / self.draft_model.num_stages_minus_1
+        #             if self.draft_model.num_stages_minus_1 > 0 else 0
+        #         )
+        #         local_cur_L_next = local_cur_L + pn*pn
+
+        #         cond_BD_or_gss = self.draft_model.shared_ada_lin(sos)
+        #         x = local_map
+        #         for blk in self.draft_model.blocks:
+        #             x = blk(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
+        #         logits_draft = self.draft_model.get_logits(x, sos)
+
+        #         t = cfg * ratio
+        #         logits_draft = (1+t)*logits_draft[:B] - t*logits_draft[B:]  # (B, l, V)
+
+        #         idx_Bl = sample_with_top_k_top_p_(
+        #             logits_draft, rng=rng, top_k=top_k, top_p=top_p, num_samples=1
+        #         )[:, :, 0]
+
+        #         if not more_smooth:
+        #             emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(idx_Bl)
+        #         else:
+        #             emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(idx_Bl)
+        #         h_BChw = emb_BlC.transpose(1,2).reshape(B, self.draft_model.Cvae, pn, pn)
+        #         local_f_hat, local_map = self.draft_model.vae_quant_proxy[0].get_next_autoregressive_input(
+        #             local_si, total_stages, local_f_hat, h_BChw
+        #         )
+
+        #         if local_si != (total_stages-1):
+        #             next_pn = self.draft_model.patch_nums[local_si+1]
+        #             local_map = local_map.view(B, self.draft_model.Cvae, -1).transpose(1,2)
+        #             local_map = (
+        #                 self.draft_model.word_embed(local_map)
+        #                 + lvl_pos[:, local_cur_L_next : local_cur_L_next + next_pn*next_pn]
+        #             )
+        #             local_map = local_map.repeat(2,1,1)
+
+
+        #     # 这里是target_model使用draft_model生成的内容生成下一层的预测
+        #     expansions = []
+        #     backup_f_hat = f_hat.clone()
+        #     backup_next_map = next_token_map.clone()
+        #     backup_cur_L = cur_L
+
+        #     local_si = si
+        #     local_f_hat = f_hat
+        #     local_map = next_token_map
+        #     local_cur_L = cur_L
 
 
 
