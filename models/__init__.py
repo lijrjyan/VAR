@@ -50,7 +50,7 @@ def build_vae_var_speculative_decoding(
     num_classes=1000, depth_draft=16, depth_target=30, shared_aln=False, attn_l2_norm=True,
     flash_if_available=True, fused_if_available=True,
     init_adaln=0.5, init_adaln_gamma=1e-5, init_head=0.02, init_std=-1, # init_std < 0: automated
-    similarity_thresh=0.8, draft_steps = 2
+    similarity_thresh=0.8,
 ) -> Tuple[VQVAE, VAR]:
     
     # disable built-in initialization for speed
