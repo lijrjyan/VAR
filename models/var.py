@@ -393,7 +393,7 @@ class SDVAR(nn.Module):
         # sos = self.draft_model.class_emb(
         #     torch.cat((label_B, torch.full_like(label_B, fill_value=self.draft_model.num_classes)), dim=0)
         # )   # shape: (2B, C)
-        sos = cond_BD = self.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.num_classes)), dim=0))
+        sos = cond_BD = self.draft_model.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.draft_model.num_classes)), dim=0))
         # 原来是sos = cond_BD但是我不知道是为了什么
         lvl_pos = self.draft_model.lvl_embed(self.draft_model.lvl_1L) + self.draft_model.pos_1LC
         next_token_map = (
