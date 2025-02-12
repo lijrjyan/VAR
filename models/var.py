@@ -335,8 +335,6 @@ class SDVAR(nn.Module):
         target_model,
         similarity_thresh: float = 0.8
     ):
-        # draft_model和target_model应该在同一个设备上
-        assert draft_model.device == target_model.device
 
         super().__init__()
         self.draft_model = draft_model
