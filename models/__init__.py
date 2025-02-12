@@ -86,5 +86,5 @@ def build_vae_var_speculative_decoding(
         flash_if_available=flash_if_available, fused_if_available=fused_if_available,
     ).to(device)
     var_target.init_weights(init_adaln=init_adaln, init_adaln_gamma=init_adaln_gamma, init_head=init_head, init_std=init_std)
-    var_sd = SDVAR(var_draft, var_target, similarity_thresh)
+    var_sd = SDVAR(var_draft.to(device), var_target.to(device), similarity_thresh)
     return vae_local, var_draft, var_target, var_sd
