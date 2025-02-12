@@ -402,7 +402,7 @@ class SDVAR(nn.Module):
             + self.draft_model.pos_start.expand(2*B, self.draft_model.first_l, -1)
             + lvl_pos[:, :self.draft_model.first_l]
         )
-        f_hat = sos.new_zeros(B, self.draft_model.Cvae, self.draft_model.patch_nums[-1], self.draft_model.patch_nums[-1])
+        draft_f_hat = sos.new_zeros(B, self.draft_model.Cvae, self.draft_model.patch_nums[-1], self.draft_model.patch_nums[-1])
         
         # 我们实际上要确保两个model的尺度数量一致，确保后提取出来方便使用
         assert self.draft_model.patch_nums == self.target_model.patch_nums
