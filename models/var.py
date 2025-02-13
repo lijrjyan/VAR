@@ -389,6 +389,8 @@ class SDVAR(nn.Module):
                 fill_value=self.draft_model.num_classes if label_B < 0 else label_B,
                 device=self.draft_model.lvl_1L.device
             )
+        else:
+            raise ValueError(f"Unsupported label_B type: {type(label_B)}. Expected None or int.")
         # sos = self.draft_model.class_emb(
         #     torch.cat((label_B, torch.full_like(label_B, fill_value=self.draft_model.num_classes)), dim=0)
         # )   # shape: (2B, C)
