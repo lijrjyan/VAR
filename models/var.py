@@ -379,21 +379,17 @@ class SDVAR(nn.Module):
         else:
             self.draft_model.rng = None
 
-        if label_B is None:
+        draft_label_B = label_B
+        if draft_label_B is None:
             draft_label_B = torch.multinomial(
                 self.draft_model.uniform_prob, num_samples=B, replacement=True, generator=self.draft_model.rng
             ).reshape(B)
-        elif isinstance(label_B, int):
+        elif isinstance(draft_label_B, int):
             draft_label_B = torch.full(
                 (B,),
-                fill_value=self.draft_model.num_classes if label_B < 0 else label_B,
+                fill_value=self.draft_model.num_classes if draft_label_B < 0 else draft_label_B,
                 device=self.draft_model.lvl_1L.device
             )
-        else:
-            raise ValueError(f"Unsupported label_B type: {type(label_B)}. Expected None or int.")
-        # sos = self.draft_model.class_emb(
-        #     torch.cat((label_B, torch.full_like(label_B, fill_value=self.draft_model.num_classes)), dim=0)
-        # )   # shape: (2B, C)
         draft_sos = draft_cond_BD = self.draft_model.class_emb(torch.cat((draft_label_B, torch.full_like(draft_label_B, fill_value=self.draft_model.num_classes)), dim=0))
         # print("draft embed dim:", self.draft_model.C)
         # print("draft cond_BD.shape:", cond_BD.shape)
@@ -501,14 +497,16 @@ class SDVAR(nn.Module):
         else:
             self.target_model.rng = None
 
-        if label_B is None:
+        target_label_B = label_B
+
+        if target_label_B is None:
             target_label_B = torch.multinomial(
                 self.target_model.uniform_prob, num_samples=B, replacement=True, generator=self.target_model.rng
             ).reshape(B)
-        elif isinstance(label_B, int):
+        elif isinstance(target_label_B, int):
             target_label_B = torch.full(
                 (B,),
-                fill_value=self.target_model.num_classes if label_B < 0 else label_B,
+                fill_value=self.target_model.num_classes if target_label_B < 0 else target_label_B,
                 device=self.target_model.lvl_1L.device
             )
 
