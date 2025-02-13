@@ -412,6 +412,7 @@ class SDVAR(nn.Module):
         
         # 实际上draft_model和target_model使用的是同一个vae，而且似乎vae不会影响其他内容，是可以公用的？
         # sos和cond_BD在整个生成过程中发生改变了吗？是可以公用的吗？
+        entry_num = 7
 
 ###### 小模型生成除最后一层以外的全部内容
         draft_cur_L = 0
@@ -419,6 +420,7 @@ class SDVAR(nn.Module):
         total_stages = len(self.patch_nums)
         
         token_hub =[]
+
 
         # 先做一个简易版本，通过draft_model生成出了最后一层以外的所有层数，然后接着让target_model生成最后已成
         for blk in self.draft_model.blocks:
@@ -429,7 +431,7 @@ class SDVAR(nn.Module):
         # 按照llm_fast_infer的方法应该是要有一个用前缀生成n步的generate函数，这里可以按照常规的code里边对arinference的修改进行调整,额外需要注意的是他需要的是logits而不是原来的图片
         for si, pn in enumerate(self.patch_nums):
             # len(self.patch_nums)-1是最后一层，
-            if si == len(self.patch_nums)-1:
+            if si == entry_num:
                 break
 
             ratio = (
@@ -497,7 +499,6 @@ class SDVAR(nn.Module):
         exit_points = [1,5,14,30,55,91,155,255,424,680]
         # 我们这里只需要target_model生成最后一层的内容所以我们这里设置成9
         # entry_num表示需要多少
-        entry_num = 9
         pindex = exit_points[entry_num]
 
         # 接受之前生成的做为target_model输出的prefix
