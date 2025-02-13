@@ -376,19 +376,15 @@ class SDVAR(nn.Module):
 
         if g_seed is not None:
             self.draft_model.rng.manual_seed(g_seed)
-            self.target_model.rng.manual_seed(g_seed)
-            # draft_rng = self.draft_model.rng
-            # target_rng = self.target_model.rng
-            rng = self.draft_model.rng
         else:
-            rng = None
+            self.draft_model.rng = None
 
         if label_B is None:
-            label_B = torch.multinomial(
-                self.draft_model.uniform_prob, num_samples=B, replacement=True, generator=rng
+            draft_label_B = torch.multinomial(
+                self.draft_model.uniform_prob, num_samples=B, replacement=True, generator=self.draft_model.rng
             ).reshape(B)
         elif isinstance(label_B, int):
-            label_B = torch.full(
+            draft_label_B = torch.full(
                 (B,),
                 fill_value=self.draft_model.num_classes if label_B < 0 else label_B,
                 device=self.draft_model.lvl_1L.device
@@ -396,21 +392,21 @@ class SDVAR(nn.Module):
         # sos = self.draft_model.class_emb(
         #     torch.cat((label_B, torch.full_like(label_B, fill_value=self.draft_model.num_classes)), dim=0)
         # )   # shape: (2B, C)
-        sos = cond_BD = self.draft_model.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.draft_model.num_classes)), dim=0))
-        print("draft embed dim:", self.draft_model.C)
-        print("draft cond_BD.shape:", cond_BD.shape)
-        print("draft num_classes:", self.draft_model.num_classes)
-        print("draft lable B.shape:",label_B.shape)
-        print("draft B:", B)
+        draft_sos = draft_cond_BD = self.draft_model.class_emb(torch.cat((draft_label_B, torch.full_like(draft_label_B, fill_value=self.draft_model.num_classes)), dim=0))
+        # print("draft embed dim:", self.draft_model.C)
+        # print("draft cond_BD.shape:", cond_BD.shape)
+        # print("draft num_classes:", self.draft_model.num_classes)
+        # print("draft lable B.shape:",label_B.shape)
+        # print("draft B:", B)
         # print("draft ")
         # 原来是sos = cond_BD但是我不知道是为了什么
-        lvl_pos = self.draft_model.lvl_embed(self.draft_model.lvl_1L) + self.draft_model.pos_1LC
-        next_token_map = (
-            sos.unsqueeze(1).expand(2*B, self.draft_model.first_l, -1)
+        draft_lvl_pos = self.draft_model.lvl_embed(self.draft_model.lvl_1L) + self.draft_model.pos_1LC
+        draft_next_token_map = (
+            draft_sos.unsqueeze(1).expand(2*B, self.draft_model.first_l, -1)
             + self.draft_model.pos_start.expand(2*B, self.draft_model.first_l, -1)
-            + lvl_pos[:, :self.draft_model.first_l]
+            + draft_lvl_pos[:, :self.draft_model.first_l]
         )
-        draft_f_hat = sos.new_zeros(B, self.draft_model.Cvae, self.draft_model.patch_nums[-1], self.draft_model.patch_nums[-1])
+        draft_f_hat = draft_sos.new_zeros(B, self.draft_model.Cvae, self.draft_model.patch_nums[-1], self.draft_model.patch_nums[-1])
         
         # 我们实际上要确保两个model的尺度数量一致，确保后提取出来方便使用
         assert self.draft_model.patch_nums == self.target_model.patch_nums
@@ -424,10 +420,10 @@ class SDVAR(nn.Module):
 
 ###### 小模型生成除最后一层以外的全部内容
         draft_cur_L = 0
-        draft_cond_BD_or_gss = self.draft_model.shared_ada_lin(sos)
+        draft_cond_BD_or_gss = self.draft_model.shared_ada_lin(draft_cond_BD)
         total_stages = len(self.patch_nums)
         
-        token_hub =[]
+        draft_token_hub =[]
 
 
         # 先做一个简易版本，通过draft_model生成出了最后一层以外的所有层数，然后接着让target_model生成最后已成
@@ -448,7 +444,7 @@ class SDVAR(nn.Module):
             )
             draft_cur_L = draft_cur_L+ pn*pn
             # cond_BD_or_gss = self.draft_model.shared_ada_lin(sos)  # 平常是在循环外的，我也不知道为什么会出现在这里，但是似乎sos在循环过程中没有改变，是不是无所谓？
-            x = next_token_map # x = local_map
+            x = draft_next_token_map # x = local_map
             
             AdaLNSelfAttn.forward
             # print(si)
@@ -456,42 +452,42 @@ class SDVAR(nn.Module):
             # print("draft cond_BD_or_gss.shape:",draft_cond_BD_or_gss.shape, flush=True)
             for blk in self.draft_model.blocks:
                 x = blk(x=x, cond_BD=draft_cond_BD_or_gss, attn_bias=None)
-            # logits_draft = self.draft_model.get_logits(x, sos) # 原来是是get_logits(x, cond_BD)为什么会变成sos呢？
-            logits_draft = self.draft_model.get_logits(x, cond_BD)
+            # draft_logits = self.draft_model.get_logits(x, sos) # 原来是是get_logits(x, cond_BD)为什么会变成sos呢？
+            draft_logits = self.draft_model.get_logits(x, draft_cond_BD)
             
             
             t = cfg * ratio
-            logits_draft = (1+t)*logits_draft[:B] - t*logits_draft[B:]  # (B, l, V)
+            draft_logits = (1+t)*draft_logits[:B] - t*draft_logits[B:]  # (B, l, V)
 
-            idx_Bl = sample_with_top_k_top_p_(
-                logits_draft, rng=rng, top_k=top_k, top_p=top_p, num_samples=1
+            draft_idx_Bl = sample_with_top_k_top_p_(
+                draft_logits, rng=self.draft_model.rng, top_k=top_k, top_p=top_p, num_samples=1
             )[:, :, 0]
 
             if not more_smooth:
-                emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(idx_Bl)
+                draft_emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(draft_idx_Bl)
             else:
-                emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(idx_Bl)
+                draft_emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(draft_idx_Bl)
             
-            h_BChw = emb_BlC.transpose(1,2).reshape(B, self.draft_model.Cvae, pn, pn)
+            draft_h_BChw = draft_emb_BlC.transpose(1,2).reshape(B, self.draft_model.Cvae, pn, pn)
 
-            draft_f_hat, next_token_map = self.draft_model.vae_quant_proxy[0].get_next_autoregressive_input(
-                si, total_stages, draft_f_hat, h_BChw
+            draft_f_hat, draft_next_token_map = self.draft_model.vae_quant_proxy[0].get_next_autoregressive_input(
+                si, total_stages, draft_f_hat, draft_h_BChw
             )
 
             # prepare for next stage
             # 由于这个不会运行到最后所以不需要做检查了
             next_pn = self.patch_nums[si+1]
-            next_token_map = next_token_map.view(B, self.draft_model.Cvae, -1).transpose(1,2)
+            draft_next_token_map = draft_next_token_map.view(B, self.draft_model.Cvae, -1).transpose(1,2)
 
-            token_hub.append(next_token_map)
-            next_token_map = (
-                self.draft_model.word_embed(next_token_map)
-                + lvl_pos[:, draft_cur_L : draft_cur_L + next_pn*next_pn]
+            draft_token_hub.append(draft_next_token_map)
+            draft_next_token_map = (
+                self.draft_model.word_embed(draft_next_token_map)
+                + draft_lvl_pos[:, draft_cur_L : draft_cur_L + next_pn*next_pn]
             )
-            next_token_map = next_token_map.repeat(2,1,1)
+            draft_next_token_map = draft_next_token_map.repeat(2,1,1)
         
-        token_hub = torch.cat(token_hub, dim = 1)
-        print("token_hub.shape:",token_hub.shape)
+        draft_token_hub = torch.cat(draft_token_hub, dim = 1)
+        # print("token_hub.shape:",token_hub.shape)
 
         # draft模型生成完毕        
         for blk in self.draft_model.blocks:
@@ -512,11 +508,11 @@ class SDVAR(nn.Module):
 
         sos = cond_BD = self.target_model.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.target_model.num_classes)), dim=0))
         target_f_hat = sos.new_zeros(B, self.target_model.Cvae, self.target_model.patch_nums[-1], self.target_model.patch_nums[-1])
-        print("embed dim:", self.target_model.C)
-        print("cond_BD.shape:", cond_BD.shape)
-        print("num_classes:", self.target_model.num_classes)
-        print("lable B.shape:",label_B.shape)
-        print("B:",B)
+        # print("embed dim:", self.target_model.C)
+        # print("cond_BD.shape:", cond_BD.shape)
+        # print("num_classes:", self.target_model.num_classes)
+        # print("lable B.shape:",label_B.shape)
+        # print("B:",B)
         lvl_pos = self.target_model.lvl_embed(self.target_model.lvl_1L) + self.target_model.pos_1LC
         # 这里存在疑惑，为什么我们需要生成一个first_token_map呢？难道说之前token_map不包括在里边吗？但似乎我们每次预测和保存的都是next_token_map而不是当前层的，这可能是其中的一个原因。
         first_token_map = sos.unsqueeze(1).expand(2 * B, self.target_model.first_l, -1) \
@@ -530,11 +526,11 @@ class SDVAR(nn.Module):
         pindex = exit_points[entry_num]
 
         # 接受之前生成的做为target_model输出的prefix
-        target_next_token_map = token_hub
+        target_next_token_map = draft_token_hub
         target_next_token_map = self.target_model.word_embed(target_next_token_map) + lvl_pos[:,1:pindex]  
         target_next_token_map = target_next_token_map.repeat(2, 1, 1)   # double the batch sizes due to CFG
         target_next_token_map = torch.cat([first_token_map,target_next_token_map],dim=1)
-        print("target_next_token_map.shape:",target_next_token_map.shape) 
+        # print("target_next_token_map.shape:",target_next_token_map.shape) 
         attn_bias = self.target_model.attn_bias_for_masking[:,:,0:pindex,0:pindex]
 
         cond_BD_or_gss = self.target_model.shared_ada_lin(cond_BD)
@@ -549,7 +545,7 @@ class SDVAR(nn.Module):
             if si<entry_num:
                 continue
             x = target_next_token_map
-            print("x:shape:",x.shape)
+            # print("x:shape:",x.shapes)
             AdaLNSelfAttn.forward
             if si == entry_num:
                 # print("attention bias shape:",attn_bias.shape, flush=True)
@@ -637,13 +633,13 @@ class SDVAR(nn.Module):
         #         x = local_map
         #         for blk in self.draft_model.blocks:
         #             x = blk(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
-        #         logits_draft = self.draft_model.get_logits(x, sos)
+        #         draft_logits = self.draft_model.get_logits(x, sos)
 
         #         t = cfg * ratio
-        #         logits_draft = (1+t)*logits_draft[:B] - t*logits_draft[B:]  # (B, l, V)
+        #         draft_logits = (1+t)*draft_logits[:B] - t*draft_logits[B:]  # (B, l, V)
 
         #         idx_Bl = sample_with_top_k_top_p_(
-        #             logits_draft, rng=rng, top_k=top_k, top_p=top_p, num_samples=1
+        #             draft_logits, rng=rng, top_k=top_k, top_p=top_p, num_samples=1
         #         )[:, :, 0]
 
         #         if not more_smooth:
@@ -680,13 +676,13 @@ class SDVAR(nn.Module):
         #         x = local_map
         #         for blk in self.draft_model.blocks:
         #             x = blk(x=x, cond_BD=cond_BD_or_gss, attn_bias=None)
-        #         logits_draft = self.draft_model.get_logits(x, sos)
+        #         draft_logits = self.draft_model.get_logits(x, sos)
 
         #         t = cfg * ratio
-        #         logits_draft = (1+t)*logits_draft[:B] - t*logits_draft[B:]  # (B, l, V)
+        #         draft_logits = (1+t)*draft_logits[:B] - t*draft_logits[B:]  # (B, l, V)
 
         #         idx_Bl = sample_with_top_k_top_p_(
-        #             logits_draft, rng=rng, top_k=top_k, top_p=top_p, num_samples=1
+        #             draft_logits, rng=rng, top_k=top_k, top_p=top_p, num_samples=1
         #         )[:, :, 0]
 
         #         if not more_smooth:
