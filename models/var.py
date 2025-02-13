@@ -497,7 +497,16 @@ class SDVAR(nn.Module):
     
 ###### target模型接受draft模型生成的内容然后生成最后一层的内容
 
-        
+        if label_B is None:
+            label_B = torch.multinomial(
+                self.target_model.uniform_prob, num_samples=B, replacement=True, generator=rng
+            ).reshape(B)
+        elif isinstance(label_B, int):
+            label_B = torch.full(
+                (B,),
+                fill_value=self.target_model.num_classes if label_B < 0 else label_B,
+                device=self.target_model.lvl_1L.device
+            )
 
         sos = cond_BD = self.target_model.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.target_model.num_classes)), dim=0))
         print("cond_BD.shape:", cond_BD.shape)
