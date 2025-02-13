@@ -506,7 +506,7 @@ class SDVAR(nn.Module):
         target_next_token_map = target_next_token_map.repeat(2, 1, 1)   # double the batch sizes due to CFG
         target_next_token_map = torch.cat([first_token_map,target_next_token_map],dim=1)
 
-        attn_bias = self.attn_bias_for_masking[:,:,0:pindex,0:pindex]
+        attn_bias = self.target_model.attn_bias_for_masking[:,:,0:pindex,0:pindex]
 
         cond_BD_or_gss = self.shared_ada_lin(cond_BD)
         
