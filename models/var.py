@@ -472,7 +472,8 @@ class SDVAR(nn.Module):
                 self.register_buffer('lvl_1L', lvl_1L)
                 attn_bias_for_masking = torch.where(d >= dT, 0., -torch.inf).reshape(1, 1, self.L, self.L)
                 self.register_buffer('attn_bias_for_masking', attn_bias_for_masking.contiguous())
-
+                for b in self.target_model.blocks:
+                    x = b(x=x, cond_BD=target_cond_BD_or_gss, attn_bias=attn_bias_for_masking)
                 
                 # 逐层判断是否接受
                 for si in range(local_si, local_si + draft_steps - 1):
