@@ -445,9 +445,9 @@ class SDVAR(nn.Module):
             x = next_token_map # x = local_map
             
             AdaLNSelfAttn.forward
-            print(si)
-            print("draft model x.shape:",x.shape, flush=True)
-            print("draft cond_BD_or_gss.shape:",draft_cond_BD_or_gss.shape, flush=True)
+            # print(si)
+            # print("draft model x.shape:",x.shape, flush=True)
+            # print("draft cond_BD_or_gss.shape:",draft_cond_BD_or_gss.shape, flush=True)
             for blk in self.draft_model.blocks:
                 x = blk(x=x, cond_BD=draft_cond_BD_or_gss, attn_bias=None)
             # logits_draft = self.draft_model.get_logits(x, sos) # 原来是是get_logits(x, cond_BD)为什么会变成sos呢？
@@ -496,6 +496,8 @@ class SDVAR(nn.Module):
         
 
         sos = cond_BD = self.target_model.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.target_model.num_classes)), dim=0))
+        print("draft cond_BD.shape:", cond_BD.shape)
+        print("draft cond_BD.shape:", cond_BD.shape)
         lvl_pos = self.target_model.lvl_embed(self.target_model.lvl_1L) + self.target_model.pos_1LC
         # 这里存在疑惑，为什么我们需要生成一个first_token_map呢？难道说之前token_map不包括在里边吗？但似乎我们每次预测和保存的都是next_token_map而不是当前层的，这可能是其中的一个原因。
         first_token_map = sos.unsqueeze(1).expand(2 * B, self.target_model.first_l, -1) \
@@ -530,9 +532,9 @@ class SDVAR(nn.Module):
             x = next_token_map
             AdaLNSelfAttn.forward
             if si == entry_num:
-                print("attention bias shape:",attn_bias.shape, flush=True)
-                print("cond_BD_or_gss.shape:",cond_BD_or_gss.shape, flush=True)
-                print("x.shape:",x.shape, flush=True)
+                # print("attention bias shape:",attn_bias.shape, flush=True)
+                # print("cond_BD_or_gss.shape:",cond_BD_or_gss.shape, flush=True)
+                # print("x.shape:",x.shape, flush=True)
                 for b in self.target_model.blocks:
                     x = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=attn_bias)
             elif si > entry_num:
