@@ -416,15 +416,16 @@ class SDVAR(nn.Module):
 
 ###### 推测解码用的参数
         accept_si = 0
-        accept_token_hub = []
         accept_L = 0
+        accept_token_hub = []
 
 ###### KVCache
         for b in self.draft_model.blocks:
             b.attn.kv_caching(True)
         for b in self.target_model.blocks:
             b.attn.kv_caching(True)
-        
+
+###### 循环：生成-验证
         while accept_si < self.num_stages_minus_1:
             local_si = accept_si
             local_L = accept_L
@@ -503,117 +504,26 @@ class SDVAR(nn.Module):
                 # 接受目标层后使用block_wise的掩码生成下一层
                 
                 # 逐层判断是否接受
-                for i in range(local_si, local_si + draft_steps - 1):
-                    # 接受则将
+                for si in range(local_si, local_si + draft_steps - 1):
+                    pn = self.patch_nums[si]
+                    # 接受则将补齐
                     if measure_similarity_with_target_parallel()==True:
+                        accept_
+                        accept_L += pn * pn 
                         pass
-                    # 拒绝则退出
+                    # 拒绝则退出并回退
                     else:
                         break
                 # 完成后退出
                 break
- 
-# ###### target模型接受draft模型生成的内容然后生成最后一层的内容
-#         exit_points = [1,5,14,30,55,91,155,255,424,680]
-#         pindex = exit_points[entry_num]
 
-#  target_token_hub = draft_token_hub
-        
-#         # target_next_token_map = target_sos.unsqueeze(1).expand(2 * B, self.target_model.first_l, -1) \
-#         #     + self.target_model.pos_start.expand(2 * B, self.target_model.first_l, -1) \
-#         #     + target_lvl_pos[:, :self.target_model.first_l]
-        
-
-        
-#         target_cur_L = 0
-        
-        
-
-#         # 接受之前生成的做为target_model输出的prefix
-#         target_next_token_map = target_token_hub
-#         target_next_token_map = self.target_model.word_embed(target_next_token_map) + target_lvl_pos[:,1:pindex]  
-#         target_next_token_map = target_next_token_map.repeat(2, 1, 1)   # double the batch sizes due to CFG
-#         target_next_token_map = torch.cat([target_first_token_map,target_next_token_map],dim=1)
-
-#         attn_bias = self.target_model.attn_bias_for_masking[:,:,0:pindex,0:pindex]
-        
-#         for blk in self.target_model.blocks:
-#             blk.attn.kv_caching(True)
-
-#         for si, pn in enumerate(self.patch_nums):   # si: i-th segment
-#             ratio = si / self.num_stages_minus_1
-#             target_cur_L += pn*pn
-#             t = cfg * ratio 
-            
-#             if si<entry_num:
-#                 continue
-
-#             x = target_next_token_map
-#             AdaLNSelfAttn.forward
-#             if si == entry_num:
-#                 # print("attention bias shape:",attn_bias.shape, flush=True)
-#                 # print("cond_BD_or_gss.shape:",cond_BD_or_gss.shape, flush=True)
-#                 # print("x.shape:",x.shape, flush=True)
-#                 for b in self.target_model.blocks:
-#                     x = b(x=x, cond_BD=target_cond_BD_or_gss, attn_bias=attn_bias)
-#             elif si > entry_num:
-#                 for b in self.target_model.blocks:
-#                     x = b(x=x, cond_BD=target_cond_BD_or_gss, attn_bias=None)
-#             # for b in self.target_model.blocks:
-#             #     x = b(x=x, cond_BD=target_cond_BD_or_gss, attn_bias=None)
-#             target_logits_BlV = self.target_model.get_logits(x, target_cond_BD)
-
-
-#             if si == entry_num:
-#                 target_logits_BlV[:B,target_cur_L-pn*pn:target_cur_L] = (1+t) * target_logits_BlV[:B,target_cur_L-pn*pn:target_cur_L] - t * target_logits_BlV[B:,target_cur_L-pn*pn:target_cur_L]
-
-#                 new_L = 0
-#                 for a, b in enumerate(self.patch_nums[0:entry_num+1]):
-#                     target_idx_Bl=sample_with_top_k_top_p_(
-#                         target_logits_BlV[:B,new_L:new_L + self.patch_nums[a] ** 2], 
-#                         rng=self.target_model.rng, 
-#                         top_k=top_k, 
-#                         top_p=top_p, 
-#                         num_samples=1
-#                     )[:, :, 0]
-#                     new_L += b*b
-                
-#                 target_logits_BlV = target_logits_BlV[:B,target_cur_L-pn*pn:target_cur_L]
-
-#             # target_logits_BlV = (1+t) * target_logits_BlV[:B] - t * target_logits_BlV[B:]
-#             # target_idx_Bl = sample_with_top_k_top_p_(target_logits_BlV, rng=self.target_model.rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0]
-            
-#             elif si > entry_num:
-#                 target_logits_BlV = (1+t) * target_logits_BlV[:B] - t * target_logits_BlV[B:]
-#                 target_idx_Bl = sample_with_top_k_top_p_(target_logits_BlV, rng=self.target_model.rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0]
-
-
-#             if not more_smooth: # this is the default case
-#                 target_h_BChw = self.target_model.vae_quant_proxy[0].embedding(target_idx_Bl)   # B, l, Cvae
-#             else:   # not used when evaluating FID/IS/Precision/Recall
-#                 target_gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)   # refer to mask-git
-#                 target_h_BChw = gumbel_softmax_with_rng(target_logits_BlV.mul(1 + ratio), tau=target_gum_t, hard=False, dim=-1, rng=self.target_model.rng) @ self.target_model.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
-
-#             target_h_BChw = target_h_BChw.transpose_(1, 2).reshape(B, self.target_model.Cvae, pn, pn)
-
-#             target_f_hat, target_next_token_map = self.target_model.vae_quant_proxy[0].get_next_autoregressive_input(si, len(self.patch_nums), target_f_hat, target_h_BChw)
-            
-#             if si != self.num_stages_minus_1:   # prepare for next stage
-#                 next_pn = self.patch_nums[si+1]
-#                 target_next_token_map = target_next_token_map.view(B, self.target_model.Cvae, -1).transpose(1, 2)
-#                 target_next_token_map = self.target_model.word_embed(target_next_token_map) + target_lvl_pos[:, target_cur_L:target_cur_L + next_pn * next_pn]
-#                 target_next_token_map = target_next_token_map.repeat(2, 1, 1)   # double the batch sizes due to CFG
-            
-#         # target模型生成完成
-#         for blk in self.target_model.blocks:
-#             blk.attn.kv_caching(False)   
-                    
-#         return self.target_model.vae_proxy[0].fhat_to_img(target_f_hat).add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
-
-
-
-
-
+###### 结束并返回结果
+        for b in self.draft_model.blocks:
+            b.attn.kv_caching(False)
+        for b in self.target_model.blocks:
+            b.attn.kv_caching(False)
+        return self.target_model.vae_proxy[0].fhat_to_img(target_f_hat).add_(1).mul_(0.5)
+    
     @torch.no_grad()
     def sdvar_autoregressive_infer_cfg_code(
         self,
