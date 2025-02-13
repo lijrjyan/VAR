@@ -354,8 +354,7 @@ class SDVAR(nn.Module):
         top_k: int = 0,
         top_p: float = 0.0,
         more_smooth: bool = False,
-        gamma: int = 4,
-        warmup_steps: int =4
+        entry_num: int = 10
     ) -> torch.Tensor:
         """
         only used for inference, on autoregressive mode
@@ -378,9 +377,7 @@ class SDVAR(nn.Module):
         self.patch_nums = self.draft_model.patch_nums
         self.num_stages_minus_1 = self.draft_model.num_stages_minus_1
 
-        entry_num = 7
         total_stages = len(self.patch_nums)
-
 
         if g_seed is not None:
             self.draft_model.rng.manual_seed(g_seed)
@@ -450,15 +447,20 @@ class SDVAR(nn.Module):
                 si, total_stages, draft_f_hat, draft_h_BChw
             )
 
-            # if si != self.num_stages_minus_1:   # prepare for next stage
-            next_pn = self.patch_nums[si+1]
-            draft_next_token_map = draft_next_token_map.view(B, self.draft_model.Cvae, -1).transpose(1,2)
-            draft_token_hub.append(draft_next_token_map)
-            draft_next_token_map = (
-                self.draft_model.word_embed(draft_next_token_map)
-                + draft_lvl_pos[:, draft_cur_L : draft_cur_L + next_pn*next_pn]
-            )
-            draft_next_token_map = draft_next_token_map.repeat(2,1,1)
+            if si != self.num_stages_minus_1:   # prepare for next stage
+                next_pn = self.patch_nums[si+1]
+                draft_next_token_map = draft_next_token_map.view(B, self.draft_model.Cvae, -1).transpose(1,2)
+                draft_token_hub.append(draft_next_token_map)
+                draft_next_token_map = (
+                    self.draft_model.word_embed(draft_next_token_map)
+                    + draft_lvl_pos[:, draft_cur_L : draft_cur_L + next_pn*next_pn]
+                )
+                draft_next_token_map = draft_next_token_map.repeat(2,1,1)
+
+            if si == self.num_stages_minus_1:
+                for blk in self.draft_model.blocks:
+                    blk.attn.kv_caching(False)
+                return self.draft_model.vae_proxy[0].fhat_to_img(draft_f_hat).add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
 
         # draft模型生成完毕  
         draft_token_hub = torch.cat(draft_token_hub, dim = 1)      
