@@ -527,6 +527,9 @@ class SDVAR(nn.Module):
             x = next_token_map
             AdaLNSelfAttn.forward
             if si == entry_num:
+                print("attention bias shape:",attn_bias.shape, flush=True)
+                print("cond_BD_or_gss.shape:",cond_BD_or_gss.shape, flush=True)
+                print("x.shape:",x, flush=True)
                 for b in self.target_model.blocks:
                     x = b(x=x, cond_BD=cond_BD_or_gss, attn_bias=attn_bias)
             elif si > entry_num:
