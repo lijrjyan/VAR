@@ -489,9 +489,9 @@ class SDVAR(nn.Module):
                 + lvl_pos[:, draft_cur_L : draft_cur_L + next_pn*next_pn]
             )
             next_token_map = next_token_map.repeat(2,1,1)
-            print()
         
         token_hub = torch.cat(token_hub, dim = 1)
+        print("token_hub.shape:",token_hub.shape)
 
         # draft模型生成完毕        
         for blk in self.draft_model.blocks:
@@ -530,10 +530,10 @@ class SDVAR(nn.Module):
 
         # 接受之前生成的做为target_model输出的prefix
         target_next_token_map = token_hub
-        target_next_token_map = self.target_model.word_embed(target_next_token_map) + lvl_pos[:,1:pindex]   
+        target_next_token_map = self.target_model.word_embed(target_next_token_map) + lvl_pos[:,1:pindex]  
         target_next_token_map = target_next_token_map.repeat(2, 1, 1)   # double the batch sizes due to CFG
         target_next_token_map = torch.cat([first_token_map,target_next_token_map],dim=1)
-
+        print("target_next_token_map.shape:",target_next_token_map.shape) 
         attn_bias = self.target_model.attn_bias_for_masking[:,:,0:pindex,0:pindex]
 
         cond_BD_or_gss = self.target_model.shared_ada_lin(cond_BD)
