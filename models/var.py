@@ -345,7 +345,7 @@ class SDVAR(nn.Module):
     # 这是一个最简单的内容，用draft_model生成除了最后一层以外的全部内容，然后用target_model生成最后一层的内容
     # 总体内容按照code的方式进行完成
     @torch.no_grad()
-    def sdvar_autoregressive_infer_cfg_lastWithTarget(
+    def sdvar_autoregressive_infer_cfg_code(
         self,
         B: int,
         label_B: Optional[Union[int, torch.LongTensor]],
