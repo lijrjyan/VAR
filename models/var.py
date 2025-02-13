@@ -515,7 +515,7 @@ class SDVAR(nn.Module):
         print("cond_BD.shape:", cond_BD.shape)
         print("num_classes:", self.target_model.num_classes)
         print("lable B.shape:",label_B.shape)
-        pirnt("B:",B)
+        print("B:",B)
         lvl_pos = self.target_model.lvl_embed(self.target_model.lvl_1L) + self.target_model.pos_1LC
         # 这里存在疑惑，为什么我们需要生成一个first_token_map呢？难道说之前token_map不包括在里边吗？但似乎我们每次预测和保存的都是next_token_map而不是当前层的，这可能是其中的一个原因。
         first_token_map = sos.unsqueeze(1).expand(2 * B, self.target_model.first_l, -1) \
