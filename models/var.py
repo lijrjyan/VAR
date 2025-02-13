@@ -595,7 +595,7 @@ class SDVAR(nn.Module):
                 gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)   # refer to mask-git
                 h_BChw = gumbel_softmax_with_rng(logits_BlV.mul(1 + ratio), tau=gum_t, hard=False, dim=-1, rng=rng) @ self.target_model.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
 
-            h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.Cvae, pn, pn)
+            h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.target_model.Cvae, pn, pn)
 
             f_hat, next_token_map = self.target_model.vae_quant_proxy[0].get_next_autoregressive_input(si, len(self.patch_nums), f_hat, h_BChw)
             
