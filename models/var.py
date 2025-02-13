@@ -511,6 +511,7 @@ class SDVAR(nn.Module):
             )
 
         sos = cond_BD = self.target_model.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.target_model.num_classes)), dim=0))
+        target_f_hat = sos.new_zeros(B, self.target_model.Cvae, self.target_model.patch_nums[-1], self.target_model.patch_nums[-1])
         print("embed dim:", self.target_model.C)
         print("cond_BD.shape:", cond_BD.shape)
         print("num_classes:", self.target_model.num_classes)
@@ -597,7 +598,7 @@ class SDVAR(nn.Module):
 
             h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.target_model.Cvae, pn, pn)
 
-            f_hat, next_token_map = self.target_model.vae_quant_proxy[0].get_next_autoregressive_input(si, len(self.patch_nums), f_hat, h_BChw)
+            target_f_hat, next_token_map = self.target_model.vae_quant_proxy[0].get_next_autoregressive_input(si, len(self.patch_nums), target_f_hat, h_BChw)
             
             if si != self.num_stages_minus_1:   # prepare for next stage
                 next_token_map = next_token_map.view(B, self.target_model.Cvae, -1).transpose(1, 2)
@@ -609,7 +610,7 @@ class SDVAR(nn.Module):
         for blk in self.target_model.blocks:
             blk.attn.kv_caching(False)   
                     
-        return f_hat, token_hub   # de-normalize, from [-1, 1] to [0, 1]
+        return target_f_hat, token_hub   # de-normalize, from [-1, 1] to [0, 1]
 
 
 
