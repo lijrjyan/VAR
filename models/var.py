@@ -442,49 +442,30 @@ class SDVAR(nn.Module):
                 draft_h_BChw = self.draft_model.vae_quant_proxy[0].embedding(draft_idx_Bl)
             else:
                 draft_gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)
-                draft_h_BChw = gumbel_softmax_with_rng(draft_logits_BlV.mul(1 + ratio), tau=gum_t, hard=False, dim=-1, rng=self.draft_model.rng) @ self.draft_model.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
-                # draft_emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(draft_idx_Bl)
-                # draft_h_BChw = self.draft_model.vae_quant_proxy[0].embedding(draft_idx_Bl)
+                draft_h_BChw = gumbel_softmax_with_rng(draft_logits_BlV.mul(1 + ratio), tau=draft_gum_t, hard=False, dim=-1, rng=self.draft_model.rng) @ self.draft_model.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
             
-            # draft_h_BChw = draft_emb_BlC.transpose(1,2).reshape(B, self.draft_model.Cvae, pn, pn)
             draft_h_BChw = draft_h_BChw.transpose(1,2).reshape(B, self.draft_model.Cvae, pn, pn)
 
             draft_f_hat, draft_next_token_map = self.draft_model.vae_quant_proxy[0].get_next_autoregressive_input(
                 si, total_stages, draft_f_hat, draft_h_BChw
             )
 
-            # prepare for next stage
-            # 由于这个不会运行到最后所以不需要做检查了
+            # if si != self.num_stages_minus_1:   # prepare for next stage
+            next_pn = self.patch_nums[si+1]
+            draft_next_token_map = draft_next_token_map.view(B, self.draft_model.Cvae, -1).transpose(1,2)
+            draft_token_hub.append(draft_next_token_map)
+            draft_next_token_map = (
+                self.draft_model.word_embed(draft_next_token_map)
+                + draft_lvl_pos[:, draft_cur_L : draft_cur_L + next_pn*next_pn]
+            )
+            draft_next_token_map = draft_next_token_map.repeat(2,1,1)
 
-            # draft_next_token_map = draft_next_token_map.view(B, self.draft_model.Cvae, -1).transpose(1,2)
-            if si != self.num_stages_minus_1:   # prepare for next stage
-                next_pn = self.patch_nums[si+1]
-                # draft_token_hub.append(draft_next_token_map)
-                draft_next_token_map = draft_next_token_map.view(B, self.draft_model.Cvae, -1).transpose(1,2)
-                draft_next_token_map = (
-                    self.draft_model.word_embed(draft_next_token_map)
-                    + draft_lvl_pos[:, draft_cur_L : draft_cur_L + next_pn*next_pn]
-                )
-                draft_next_token_map = draft_next_token_map.repeat(2,1,1)
-
-
-
-        #     next_pn = self.patch_nums[si+1]
-        #     draft_token_hub.append(draft_next_token_map)
-        #     draft_next_token_map = (
-        #         self.draft_model.word_embed(draft_next_token_map)
-        #         + draft_lvl_pos[:, draft_cur_L : draft_cur_L + next_pn*next_pn]
-        #     )
-        #     draft_next_token_map = draft_next_token_map.repeat(2,1,1)
-        
-        # draft_token_hub = torch.cat(draft_token_hub, dim = 1)
-        # print("token_hub.shape:",token_hub.shape)
-
-        # draft模型生成完毕        
+        # draft模型生成完毕  
+        draft_token_hub = torch.cat(draft_token_hub, dim = 1)      
         for blk in self.draft_model.blocks:
             blk.attn.kv_caching(False)
         
-        return self.draft_model.vae_proxy[0].fhat_to_img(draft_f_hat).add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
+        # return self.draft_model.vae_proxy[0].fhat_to_img(draft_f_hat).add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
     
 ###### target模型接受draft模型生成的内容然后生成最后一层的内容
         if g_seed is not None:
