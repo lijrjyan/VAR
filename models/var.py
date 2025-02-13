@@ -587,7 +587,7 @@ class SDVAR(nn.Module):
                 ratio = si / self.num_stages_minus_1
                 t = cfg * ratio
                 logits_BlV = (1+t) * logits_BlV[:B] - t * logits_BlV[B:]
-                idx_Bl = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k[si], top_p=top_p, num_samples=1)[:, :, 0]
+                idx_Bl = sample_with_top_k_top_p_(logits_BlV, rng=rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0]
 
 
             if not more_smooth: # this is the default case
