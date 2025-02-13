@@ -377,6 +377,8 @@ class SDVAR(nn.Module):
         if g_seed is not None:
             self.draft_model.rng.manual_seed(g_seed)
             self.target_model.rng.manual_seed(g_seed)
+            # draft_rng = self.draft_model.rng
+            # target_rng = self.target_model.rng
             rng = self.draft_model.rng
         else:
             rng = None
@@ -477,6 +479,7 @@ class SDVAR(nn.Module):
                 + lvl_pos[:, draft_cur_L : draft_cur_L + next_pn*next_pn]
             )
             next_token_map = next_token_map.repeat(2,1,1)
+            print()
         
         token_hub = torch.cat(token_hub, dim = 1)
 
@@ -515,7 +518,7 @@ class SDVAR(nn.Module):
         
         for blk in self.target_model.blocks:
             blk.attn.kv_caching(True)
-            
+
         for si, pn in enumerate(self.patch_nums):   # si: i-th segment
             target_cur_L += pn*pn
             if si<entry_num:
