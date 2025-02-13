@@ -397,6 +397,7 @@ class SDVAR(nn.Module):
         #     torch.cat((label_B, torch.full_like(label_B, fill_value=self.draft_model.num_classes)), dim=0)
         # )   # shape: (2B, C)
         sos = cond_BD = self.draft_model.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.draft_model.num_classes)), dim=0))
+        print("draft embed dim:", self.draft_model.C)
         print("draft cond_BD.shape:", cond_BD.shape)
         print("draft num_classes:", self.draft_model.num_classes)
         print("draft lable B.shape:",label_B.shape)
@@ -510,7 +511,8 @@ class SDVAR(nn.Module):
             )
 
         sos = cond_BD = self.target_model.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.target_model.num_classes)), dim=0))
-        print("111cond_BD.shape:", cond_BD.shape)
+        print("embed dim:", self.target_model.C)
+        print("cond_BD.shape:", cond_BD.shape)
         print("num_classes:", self.target_model.num_classes)
         print("lable B.shape:",label_B.shape)
         pirnt("B:",B)
