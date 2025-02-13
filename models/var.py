@@ -508,7 +508,7 @@ class SDVAR(nn.Module):
 
         attn_bias = self.target_model.attn_bias_for_masking[:,:,0:pindex,0:pindex]
 
-        cond_BD_or_gss = self.shared_ada_lin(cond_BD)
+        cond_BD_or_gss = self.target_model.shared_ada_lin(cond_BD)
         
         target_cur_L = 0
         
