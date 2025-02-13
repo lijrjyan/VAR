@@ -445,6 +445,7 @@ class SDVAR(nn.Module):
             x = next_token_map # x = local_map
             
             AdaLNSelfAttn.forward
+            print("draft model "+ si +" x.shape:",x, flush=True)
             for blk in self.draft_model.blocks:
                 x = blk(x=x, cond_BD=draft_cond_BD_or_gss, attn_bias=None)
             # logits_draft = self.draft_model.get_logits(x, sos) # 原来是是get_logits(x, cond_BD)为什么会变成sos呢？
