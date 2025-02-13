@@ -441,7 +441,8 @@ class SDVAR(nn.Module):
             draft_cur_L = draft_cur_L+ pn*pn
             # cond_BD_or_gss = self.draft_model.shared_ada_lin(sos)  # 平常是在循环外的，我也不知道为什么会出现在这里，但是似乎sos在循环过程中没有改变，是不是无所谓？
             x = next_token_map # x = local_map
-
+            
+            AdaLNSelfAttn.forward
             for blk in self.draft_model.blocks:
                 x = blk(x=x, cond_BD=draft_cond_BD_or_gss, attn_bias=None)
             # logits_draft = self.draft_model.get_logits(x, sos) # 原来是是get_logits(x, cond_BD)为什么会变成sos呢？
@@ -484,8 +485,7 @@ class SDVAR(nn.Module):
             blk.attn.kv_caching(False)
     
 ###### target模型接受draft模型生成的内容然后生成最后一层的内容
-        for blk in self.target_model.blocks:
-            blk.attn.kv_caching(True)
+
         
 
         sos = cond_BD = self.target_model.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.target_model.num_classes)), dim=0))
@@ -513,6 +513,9 @@ class SDVAR(nn.Module):
         
         target_cur_L = 0
         
+        for blk in self.target_model.blocks:
+            blk.attn.kv_caching(True)
+            
         for si, pn in enumerate(self.patch_nums):   # si: i-th segment
             target_cur_L += pn*pn
             if si<entry_num:
