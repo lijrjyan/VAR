@@ -598,13 +598,13 @@ class SDVAR(nn.Module):
 
             h_BChw = h_BChw.transpose_(1, 2).reshape(B, self.target_model.Cvae, pn, pn)
 
-            target_f_hat, next_token_map = self.target_model.vae_quant_proxy[0].get_next_autoregressive_input(si, len(self.patch_nums), target_f_hat, h_BChw)
+            target_f_hat, target_next_token_map = self.target_model.vae_quant_proxy[0].get_next_autoregressive_input(si, len(self.patch_nums), target_f_hat, h_BChw)
             
             if si != self.num_stages_minus_1:   # prepare for next stage
-                next_token_map = next_token_map.view(B, self.target_model.Cvae, -1).transpose(1, 2)
-                token_hub = torch.cat([token_hub,next_token_map],dim=1)
-                next_token_map = self.target_model.word_embed(next_token_map) + lvl_pos[:, target_cur_L:target_cur_L + self.patch_nums[si+1] ** 2]
-                next_token_map = next_token_map.repeat(2, 1, 1)   # double the batch sizes due to CFG
+                target_next_token_map = target_next_token_map.view(B, self.target_model.Cvae, -1).transpose(1, 2)
+                token_hub = torch.cat([token_hub,target_next_token_map],dim=1)
+                target_next_token_map = self.target_model.word_embed(target_next_token_map) + lvl_pos[:, target_cur_L:target_cur_L + self.patch_nums[si+1] ** 2]
+                target_ext_token_map = target_next_token_map.repeat(2, 1, 1)   # double the batch sizes due to CFG
             
         # target模型生成完成
         for blk in self.target_model.blocks:
