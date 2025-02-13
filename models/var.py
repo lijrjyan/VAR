@@ -610,7 +610,7 @@ class SDVAR(nn.Module):
         for blk in self.target_model.blocks:
             blk.attn.kv_caching(False)   
                     
-        return target_f_hat, token_hub   # de-normalize, from [-1, 1] to [0, 1]
+        return target_f_hat   # de-normalize, from [-1, 1] to [0, 1]
 
 
 
