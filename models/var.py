@@ -473,6 +473,7 @@ class SDVAR(nn.Module):
             # 由于这个不会运行到最后所以不需要做检查了
             next_pn = self.patch_nums[si+1]
             next_token_map = next_token_map.view(B, self.draft_model.Cvae, -1).transpose(1,2)
+
             token_hub.append(next_token_map)
             next_token_map = (
                 self.draft_model.word_embed(next_token_map)
