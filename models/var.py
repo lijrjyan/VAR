@@ -573,7 +573,7 @@ class SDVAR(nn.Module):
                     idx_Bl=sample_with_top_k_top_p_(
                         logits_BlV[:B,new_L:new_L + self.patch_nums[a] ** 2], 
                         rng=rng, 
-                        top_k=top_k[a], 
+                        top_k=top_k, 
                         top_p=top_p, 
                         num_samples=1
                     )[:, :, 0]
