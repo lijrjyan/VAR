@@ -373,6 +373,16 @@ class SDVAR(nn.Module):
         """
         
 ###### 初始化参数
+        # 我们实际上要确保两个model的尺度数量一致，确保后提取出来方便使用
+        assert self.draft_model.patch_nums == self.target_model.patch_nums
+        assert self.draft_model.num_stages_minus_1 == self.target_model.num_stages_minus_1
+        self.patch_nums = self.draft_model.patch_nums
+        self.num_stages_minus_1 = self.draft_model.num_stages_minus_1
+        # 实际上draft_model和target_model使用的是同一个vae，而且似乎vae不会影响其他内容，是可以公用的？
+        # sos和cond_BD在整个生成过程中发生改变了吗？是可以公用的吗？
+        entry_num = 7
+        total_stages = len(self.patch_nums)
+
 
         if g_seed is not None:
             self.draft_model.rng.manual_seed(g_seed)
@@ -390,7 +400,9 @@ class SDVAR(nn.Module):
                 fill_value=self.draft_model.num_classes if draft_label_B < 0 else draft_label_B,
                 device=self.draft_model.lvl_1L.device
             )
+
         draft_sos = draft_cond_BD = self.draft_model.class_emb(torch.cat((draft_label_B, torch.full_like(draft_label_B, fill_value=self.draft_model.num_classes)), dim=0))
+
         # print("draft embed dim:", self.draft_model.C)
         # print("draft cond_BD.shape:", cond_BD.shape)
         # print("draft num_classes:", self.draft_model.num_classes)
@@ -398,75 +410,64 @@ class SDVAR(nn.Module):
         # print("draft B:", B)
         # print("draft ")
         # 原来是sos = cond_BD但是我不知道是为了什么
+
         draft_lvl_pos = self.draft_model.lvl_embed(self.draft_model.lvl_1L) + self.draft_model.pos_1LC
         draft_next_token_map = (
             draft_sos.unsqueeze(1).expand(2*B, self.draft_model.first_l, -1)
             + self.draft_model.pos_start.expand(2*B, self.draft_model.first_l, -1)
             + draft_lvl_pos[:, :self.draft_model.first_l]
         )
+        
+        draft_cur_L = 0
         draft_f_hat = draft_sos.new_zeros(B, self.draft_model.Cvae, self.draft_model.patch_nums[-1], self.draft_model.patch_nums[-1])
         
-        # 我们实际上要确保两个model的尺度数量一致，确保后提取出来方便使用
-        assert self.draft_model.patch_nums == self.target_model.patch_nums
-        assert self.draft_model.num_stages_minus_1 == self.target_model.num_stages_minus_1
-        self.patch_nums = self.draft_model.patch_nums
-        self.num_stages_minus_1 = self.draft_model.num_stages_minus_1
-        
-        # 实际上draft_model和target_model使用的是同一个vae，而且似乎vae不会影响其他内容，是可以公用的？
-        # sos和cond_BD在整个生成过程中发生改变了吗？是可以公用的吗？
-        entry_num = 7
-
-###### 小模型生成除最后一层以外的全部内容
-        draft_cur_L = 0
         draft_cond_BD_or_gss = self.draft_model.shared_ada_lin(draft_cond_BD)
-        total_stages = len(self.patch_nums)
         
-        draft_token_hub =[]
-
-
-        # 先做一个简易版本，通过draft_model生成出了最后一层以外的所有层数，然后接着让target_model生成最后已成
         for blk in self.draft_model.blocks:
             blk.attn.kv_caching(True)
 
+        draft_token_hub =[]
+        # 先做一个简易版本，通过draft_model生成出了最后一层以外的所有层数，然后接着让target_model生成最后已成
         # 小模型生成draft_steps步的内容
         # 这里是draft_model使用最开始的token_map使用生成向后draft_steps层的预测
         # 按照llm_fast_infer的方法应该是要有一个用前缀生成n步的generate函数，这里可以按照常规的code里边对arinference的修改进行调整,额外需要注意的是他需要的是logits而不是原来的图片
+        
         for si, pn in enumerate(self.patch_nums):
-            # len(self.patch_nums)-1是最后一层，
-            if si == entry_num:
-                break
+            # if si == entry_num:
+            #     break
 
-            ratio = (
-                si / self.num_stages_minus_1
-                if self.num_stages_minus_1 > 0 else 0
-            )
-            draft_cur_L = draft_cur_L+ pn*pn
+            ratio = si / self.num_stages_minus_1
+            draft_cur_L += pn*pn
             # cond_BD_or_gss = self.draft_model.shared_ada_lin(sos)  # 平常是在循环外的，我也不知道为什么会出现在这里，但是似乎sos在循环过程中没有改变，是不是无所谓？
             x = draft_next_token_map # x = local_map
             
-            AdaLNSelfAttn.forward
             # print(si)
             # print("draft model x.shape:",x.shape, flush=True)
             # print("draft cond_BD_or_gss.shape:",draft_cond_BD_or_gss.shape, flush=True)
+            # draft_logits = self.draft_model.get_logits(x, sos) # 原来是是get_logits(x, cond_BD)为什么会变成sos呢？
+            AdaLNSelfAttn.forward
             for blk in self.draft_model.blocks:
                 x = blk(x=x, cond_BD=draft_cond_BD_or_gss, attn_bias=None)
-            # draft_logits = self.draft_model.get_logits(x, sos) # 原来是是get_logits(x, cond_BD)为什么会变成sos呢？
-            draft_logits = self.draft_model.get_logits(x, draft_cond_BD)
-            
+            draft_logits_BlV = self.draft_model.get_logits(x, draft_cond_BD)            
             
             t = cfg * ratio
-            draft_logits = (1+t)*draft_logits[:B] - t*draft_logits[B:]  # (B, l, V)
+            draft_logits_BlV = (1+t)*draft_logits_BlV[:B] - t*draft_logits_BlV[B:]  # (B, l, V)
 
             draft_idx_Bl = sample_with_top_k_top_p_(
-                draft_logits, rng=self.draft_model.rng, top_k=top_k, top_p=top_p, num_samples=1
+                draft_logits_BlV, rng=self.draft_model.rng, top_k=top_k, top_p=top_p, num_samples=1
             )[:, :, 0]
 
             if not more_smooth:
-                draft_emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(draft_idx_Bl)
+                draft_h_BChw = self.draft_model.vae_quant_proxy[0].embedding(draft_idx_Bl)
+                # draft_emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(draft_idx_Bl)
             else:
-                draft_emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(draft_idx_Bl)
+                draft_gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)
+                draft_h_BChw = gumbel_softmax_with_rng(draft_logits_BlV.mul(1 + ratio), tau=gum_t, hard=False, dim=-1, rng=self.draft_model.rng) @ self.draft_model.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
+                # draft_emb_BlC = self.draft_model.vae_quant_proxy[0].embedding(draft_idx_Bl)
+                # draft_h_BChw = self.draft_model.vae_quant_proxy[0].embedding(draft_idx_Bl)
             
-            draft_h_BChw = draft_emb_BlC.transpose(1,2).reshape(B, self.draft_model.Cvae, pn, pn)
+            # draft_h_BChw = draft_emb_BlC.transpose(1,2).reshape(B, self.draft_model.Cvae, pn, pn)
+            draft_h_BChw = draft_h_BChw.transpose(1,2).reshape(B, self.draft_model.Cvae, pn, pn)
 
             draft_f_hat, draft_next_token_map = self.draft_model.vae_quant_proxy[0].get_next_autoregressive_input(
                 si, total_stages, draft_f_hat, draft_h_BChw
@@ -474,22 +475,36 @@ class SDVAR(nn.Module):
 
             # prepare for next stage
             # 由于这个不会运行到最后所以不需要做检查了
-            next_pn = self.patch_nums[si+1]
-            draft_next_token_map = draft_next_token_map.view(B, self.draft_model.Cvae, -1).transpose(1,2)
 
-            draft_token_hub.append(draft_next_token_map)
-            draft_next_token_map = (
-                self.draft_model.word_embed(draft_next_token_map)
-                + draft_lvl_pos[:, draft_cur_L : draft_cur_L + next_pn*next_pn]
-            )
-            draft_next_token_map = draft_next_token_map.repeat(2,1,1)
+            # draft_next_token_map = draft_next_token_map.view(B, self.draft_model.Cvae, -1).transpose(1,2)
+            if si != self.num_stages_minus_1:   # prepare for next stage
+                next_pn = self.patch_nums[si+1]
+                # draft_token_hub.append(draft_next_token_map)
+                draft_next_token_map = draft_next_token_map.view(B, self.draft_model.Cvae, -1).transpose(1,2)
+                draft_next_token_map = (
+                    self.draft_model.word_embed(draft_next_token_map)
+                    + draft_lvl_pos[:, draft_cur_L : draft_cur_L + next_pn*next_pn]
+                )
+                draft_next_token_map = draft_next_token_map.repeat(2,1,1)
+
+
+
+        #     next_pn = self.patch_nums[si+1]
+        #     draft_token_hub.append(draft_next_token_map)
+        #     draft_next_token_map = (
+        #         self.draft_model.word_embed(draft_next_token_map)
+        #         + draft_lvl_pos[:, draft_cur_L : draft_cur_L + next_pn*next_pn]
+        #     )
+        #     draft_next_token_map = draft_next_token_map.repeat(2,1,1)
         
-        draft_token_hub = torch.cat(draft_token_hub, dim = 1)
+        # draft_token_hub = torch.cat(draft_token_hub, dim = 1)
         # print("token_hub.shape:",token_hub.shape)
 
         # draft模型生成完毕        
         for blk in self.draft_model.blocks:
             blk.attn.kv_caching(False)
+        
+        return self.draft_model.vae_proxy[0].fhat_to_img(draft_f_hat).add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
     
 ###### target模型接受draft模型生成的内容然后生成最后一层的内容
         if g_seed is not None:
