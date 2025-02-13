@@ -509,7 +509,7 @@ class SDVAR(nn.Module):
             )
 
         sos = cond_BD = self.target_model.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.target_model.num_classes)), dim=0))
-        print("cond_BD.shape:", cond_BD.shape)
+        print("111cond_BD.shape:", cond_BD.shape)
         print("num_classes:", self.draft_model.num_classes)
         print("lable B.shape:",label_B.shape)
         lvl_pos = self.target_model.lvl_embed(self.target_model.lvl_1L) + self.target_model.pos_1LC
