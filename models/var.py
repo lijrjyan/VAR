@@ -402,7 +402,7 @@ class SDVAR(nn.Module):
             + self.draft_model.pos_start.expand(2*B, self.draft_model.first_l, -1)
             + draft_lvl_pos[:, :self.draft_model.first_l]
         )
-        # 这个其实没什么用
+        # 这个其实没什么用，因为其实draft的f_hat不会用到
         draft_f_hat = draft_sos.new_zeros(B, self.draft_model.Cvae, self.draft_model.patch_nums[-1], self.draft_model.patch_nums[-1])
 
         target_sos = target_cond_BD = self.target_model.class_emb(torch.cat((label_B, torch.full_like(label_B, fill_value=self.target_model.num_classes)), dim=0))
@@ -418,6 +418,11 @@ class SDVAR(nn.Module):
         accept_si = 0
         accept_L = 0
         accept_token_hub = []
+        self.exit_points = [0] * len(self.patch_nums)
+        self.exit_points[0] = self.patch_nums[0] ** 2
+        for i in range(1, len(self.patch_nums)):
+            self.exit_points[i] = self.exit_points[i - 1] + self.patch_nums[i] ** 2
+
 
 ###### KVCache
         for b in self.draft_model.blocks:
@@ -429,7 +434,7 @@ class SDVAR(nn.Module):
         while accept_si < self.num_stages_minus_1:
             local_si = accept_si
             local_L = accept_L
-            draft_steps = min(gamma, total_stages -si)
+            draft_steps = min(gamma, self.num_stages_minus_1 -si)
             # backup_xxx
             
             # draft_model生成draft
@@ -439,59 +444,16 @@ class SDVAR(nn.Module):
                     continue
                 # 生成到已经接受的
                 elif si == accept_si:
-                    pass
-                # 生成足够的多的draft以后退出
-                elif si == accept_si + draft_steps - 1:
-                    break
+                    draft_token_hub = accept_token_hub
+                    draft_next_token_map = draft_next_token_map.repeat(2, 1, 1)   # double the batch sizes due to CFG
+                    draft_next_token_map = torch.cat([draft_first_token_map,draft_next_token_map],dim=1)
                 
-                    # 生成draft
-                #     ratio = si / self.num_stages_minus_1
-                #     draft_cur_L += pn*pn
-                #     x = draft_next_token_map
-                    
-                #     AdaLNSelfAttn.forward
-                #     for blk in self.draft_model.blocks:
-                #         x = blk(x=x, cond_BD=draft_cond_BD_or_gss, attn_bias=None)
-                #     draft_logits_BlV = self.draft_model.get_logits(x, draft_cond_BD)            
-                    
-                #     t = cfg * ratio
-                #     draft_logits_BlV = (1+t)*draft_logits_BlV[:B] - t*draft_logits_BlV[B:]  # (B, l, V)
-
-                #     draft_idx_Bl = sample_with_top_k_top_p_(
-                #         draft_logits_BlV, rng=self.draft_model.rng, top_k=top_k, top_p=top_p, num_samples=1
-                #     )[:, :, 0]
-
-                #     if not more_smooth:
-                #         draft_h_BChw = self.draft_model.vae_quant_proxy[0].embedding(draft_idx_Bl)
-                #     else:
-                #         draft_gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)
-                #         draft_h_BChw = gumbel_softmax_with_rng(draft_logits_BlV.mul(1 + ratio), tau=draft_gum_t, hard=False, dim=-1, rng=self.draft_model.rng) @ self.draft_model.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
-                    
-                #     draft_h_BChw = draft_h_BChw.transpose(1,2).reshape(B, self.draft_model.Cvae, pn, pn)
-
-                #     draft_f_hat, draft_next_token_map = self.draft_model.vae_quant_proxy[0].get_next_autoregressive_input(
-                #         si, total_stages, draft_f_hat, draft_h_BChw
-                #     )
-
-                #     if si != self.num_stages_minus_1:   # prepare for next stage
-                #         next_pn = self.patch_nums[si+1]
-                #         draft_next_token_map = draft_next_token_map.view(B, self.draft_model.Cvae, -1).transpose(1,2)
-                #         draft_token_hub.append(draft_next_token_map)
-                #         draft_next_token_map = (
-                #             self.draft_model.word_embed(draft_next_token_map)
-                #             + draft_lvl_pos[:, draft_cur_L : draft_cur_L + next_pn*next_pn]
-                #         )
-                #         draft_next_token_map = draft_next_token_map.repeat(2,1,1)
-
-                #     if si == self.num_stages_minus_1:
-                #         for blk in self.draft_model.blocks:
-                #             blk.attn.kv_caching(False)
-                #         return self.draft_model.vae_proxy[0].fhat_to_img(draft_f_hat).add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
-
-                # # draft模型生成完毕  
-                # draft_token_hub = torch.cat(draft_token_hub, dim = 1)      
-                # for blk in self.draft_model.blocks:
-                #     blk.attn.kv_caching(False)
+                AdaLNSelfAttn.forward
+                
+                
+                # 生成足够的多的draft以后退出
+                if si == accept_si + draft_steps - 1:
+                    break
             
             # target_model验证draft
             for si, pn in enumerate(self.patch_nums):
@@ -500,19 +462,31 @@ class SDVAR(nn.Module):
                     continue
                 # 到达目标层后接受token
                 if si == accept_si + draft_steps - 1:
-                    continue
+                    target_L = local_L
+                    target_token_hub = draft_token_hub
+                    target_next_token_map = self.target_model.word_embed(target_next_token_map) + target_lvl_pos[:,1:pindex] 
                 # 接受目标层后使用block_wise的掩码生成下一层
+                d: torch.Tensor = torch.cat([torch.full((pn*pn,), i) for i, pn in enumerate(self.patch_nums)]).view(1, self.L, 1)
+                dT = d.transpose(1, 2)    # dT: 11L
+                lvl_1L = dT[:, 0].contiguous()
+                self.register_buffer('lvl_1L', lvl_1L)
+                attn_bias_for_masking = torch.where(d >= dT, 0., -torch.inf).reshape(1, 1, self.L, self.L)
+                self.register_buffer('attn_bias_for_masking', attn_bias_for_masking.contiguous())
+
                 
                 # 逐层判断是否接受
                 for si in range(local_si, local_si + draft_steps - 1):
                     pn = self.patch_nums[si]
                     # 接受则将补齐
                     if measure_similarity_with_target_parallel()==True:
-                        accept_
-                        accept_L += pn * pn 
+                        accept_si = si
+                        accept_L += pn * pn
+                        accept_token_hub.append()
                         pass
                     # 拒绝则退出并回退
                     else:
+                        # 小模型回退
+                        # 大模型回退
                         break
                 # 完成后退出
                 break
@@ -525,7 +499,7 @@ class SDVAR(nn.Module):
         return self.target_model.vae_proxy[0].fhat_to_img(target_f_hat).add_(1).mul_(0.5)
     
     @torch.no_grad()
-    def sdvar_autoregressive_infer_cfg_code(
+    def sdvar_autoregressive_infer_cfg_sd_test(
         self,
         B: int,
         label_B: Optional[Union[int, torch.LongTensor]],
