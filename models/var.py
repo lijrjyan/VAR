@@ -547,7 +547,7 @@ class SDVAR(nn.Module):
             target_cur_L += pn*pn
             if si<entry_num:
                 continue
-            x = next_token_map
+            x = target_next_token_map
             print("x:shape:",x.shape)
             AdaLNSelfAttn.forward
             if si == entry_num:
