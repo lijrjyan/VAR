@@ -548,6 +548,7 @@ class SDVAR(nn.Module):
             if si<entry_num:
                 continue
             x = next_token_map
+            print("x:shape:",x.shape)
             AdaLNSelfAttn.forward
             if si == entry_num:
                 # print("attention bias shape:",attn_bias.shape, flush=True)
