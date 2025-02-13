@@ -570,7 +570,13 @@ class SDVAR(nn.Module):
 
                 new_L = 0
                 for a, b in enumerate(self.patch_nums[0:entry_num+1]):
-                    idx_Bl=sample_with_top_k_top_p_(logits_BlV[:B,new_L:new_L + self.patch_nums[a] ** 2], rng=rng, top_k=top_k[a], top_p=top_p, num_samples=1)[:, :, 0]
+                    idx_Bl=sample_with_top_k_top_p_(
+                        logits_BlV[:B,new_L:new_L + self.patch_nums[a] ** 2], 
+                        rng=rng, 
+                        top_k=top_k[a], 
+                        top_p=top_p, 
+                        num_samples=1
+                    )[:, :, 0]
                     new_L += b*b
                 
                 logits_BlV = logits_BlV[:B,target_cur_L-pn*pn:target_cur_L]
