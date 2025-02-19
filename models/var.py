@@ -1034,6 +1034,7 @@ class SDVAR(nn.Module):
         ###### Stage 3: target_model 最终生成 (entry_num_2 -> end)
 
         pindex2 = exit_points[entry_num_2]
+        print(pindex2,flush=True)
 
         if g_seed is not None:
             self.target_model.rng.manual_seed(g_seed)
@@ -1056,22 +1057,24 @@ class SDVAR(nn.Module):
             torch.cat((target_label_B, torch.full_like(target_label_B, fill_value=self.target_model.num_classes)), dim=0)
         )
         target_lvl_pos = self.target_model.lvl_embed(self.target_model.lvl_1L) + self.target_model.pos_1LC
-        target_first_token_map = (
-            target_sos.unsqueeze(1).expand(2 * B, self.target_model.first_l, -1)
-            + self.target_model.pos_start.expand(2 * B, self.target_model.first_l, -1)
-            + target_lvl_pos[:, :self.target_model.first_l]
-        )
-
-        # 使用 draft_model 的输出作为 prefix
         target_token_hub = draft_token_hub
-        target_next_token_map = self.target_model.word_embed(target_token_hub) + target_lvl_pos[:, 1:pindex2]
-        target_next_token_map = target_next_token_map.repeat(2, 1, 1)
-        target_next_token_map = torch.cat([target_first_token_map, target_next_token_map], dim=1)
+        
+        target_first_token_map = target_sos.unsqueeze(1).expand(2 * B, self.target_model.first_l, -1) \
+            + self.target_model.pos_start.expand(2 * B, self.target_model.first_l, -1) \
+            + target_lvl_pos[:, :self.target_model.first_l]
+
         target_cur_L = 0
         target_f_hat = target_sos.new_zeros(B, self.target_model.Cvae,
                                             self.target_model.patch_nums[-1],
                                             self.target_model.patch_nums[-1])
+        
         target_cond_BD_or_gss = self.target_model.shared_ada_lin(target_cond_BD)
+
+        # 使用 draft_model 的输出作为 prefix
+        target_next_token_map = self.target_model.word_embed(target_token_hub) + target_lvl_pos[:, 1:pindex2]
+        target_next_token_map = target_next_token_map.repeat(2, 1, 1)
+        target_next_token_map = torch.cat([target_first_token_map, target_next_token_map], dim=1)
+
         attn_bias = self.target_model.attn_bias_for_masking[:, :, 0:pindex2, 0:pindex2]
         for blk in self.target_model.blocks:
             blk.attn.kv_caching(True)
