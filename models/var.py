@@ -779,6 +779,7 @@ class SDVAR(nn.Module):
         self.patch_nums = self.draft_model.patch_nums
         self.num_stages_minus_1 = self.draft_model.num_stages_minus_1
         total_stages = len(self.patch_nums)
+        exit_points = [1, 5, 14, 30, 55, 91, 155, 255, 424, 680]
 
         #############################################################
         ###### Stage 1: target_model 生成初始部分 (0 -> entry_num_1)
@@ -861,6 +862,9 @@ class SDVAR(nn.Module):
 
         #############################################################
         ###### Stage 2: draft_model 生成中间部分 (entry_num_1 -> entry_num_2)
+
+        pindex1 = exit_points[entry_num_1]
+
         if g_seed is not None:
             self.draft_model.rng.manual_seed(g_seed)
         else:
@@ -899,31 +903,55 @@ class SDVAR(nn.Module):
                                         self.draft_model.patch_nums[-1])
         draft_cond_BD_or_gss = self.draft_model.shared_ada_lin(draft_cond_BD)
 
+        draft_attn_bias = self.draft_model.attn_bias_for_masking[:,:,0:pindex1,0:pindex1]
+
         draft_token_hub = []
         for blk in self.draft_model.blocks:
             blk.attn.kv_caching(True)
         for si, pn in enumerate(self.patch_nums):
             ratio = si / self.num_stages_minus_1
             draft_cur_L += pn * pn
+            t = cfg * ratio
+            
             if si < entry_num_1:
                 continue
             if si >= entry_num_2:
                 break
 
             x = draft_next_token_map
-            for blk in self.draft_model.blocks:
-                x = blk(x=x, cond_BD=draft_cond_BD_or_gss, attn_bias=None)
+            AdaLNSelfAttn.forward
+            if si == entry_num_1:
+                for blk in self.draft_model.blocks:
+                    x = blk(x=x, cond_BD=draft_cond_BD_or_gss, attn_bias=draft_attn_bias)
+            elif si > entry_num_1:
+                for blk in self.draft_model.blocks:
+                    x = blk(x=x, cond_BD=draft_cond_BD_or_gss, attn_bias=None)
             draft_logits_BlV = self.draft_model.get_logits(x, draft_cond_BD)
 
-            t = cfg * ratio
-            draft_logits_BlV = (1 + t) * draft_logits_BlV[:B] - t * draft_logits_BlV[B:]
-            draft_idx_Bl = sample_with_top_k_top_p_(
-                draft_logits_BlV, 
-                rng=self.draft_model.rng, 
-                top_k=top_k, 
-                top_p=top_p, 
-                num_samples=1
-            )[:, :, 0]
+            if si == entry_num_1:
+                draft_logits_BlV[:B,draft_cur_L-pn*pn:draft_cur_L] = (1+t) * draft_logits_BlV[:B,draft_cur_L-pn*pn:draft_cur_L] - t * draft_logits_BlV[B:,draft_cur_L-pn*pn:draft_cur_L]
+
+                new_L = 0
+                for a, b in enumerate(self.patch_nums[0:entry_num_1+1]):
+                    draft_idx_Bl=sample_with_top_k_top_p_(
+                        draft_logits_BlV[:B,new_L:new_L + self.patch_nums[a] ** 2], 
+                        rng=self.draft_model.rng, 
+                        top_k=top_k, 
+                        top_p=top_p, 
+                        num_samples=1
+                    )[:, :, 0]
+                    new_L += b*b
+                
+                draft_logits_BlV = draft_logits_BlV[:B,draft_cur_L-pn*pn:draft_cur_L]
+            elif si > entry_num_2:
+                draft_logits_BlV = (1 + t) * draft_logits_BlV[:B] - t * draft_logits_BlV[B:]
+                draft_idx_Bl = sample_with_top_k_top_p_(
+                    draft_logits_BlV, 
+                    rng=self.draft_model.rng, 
+                    top_k=top_k, 
+                    top_p=top_p, 
+                    num_samples=1
+                )[:, :, 0]
 
             if not more_smooth:
                 draft_h_BChw = self.draft_model.vae_quant_proxy[0].embedding(draft_idx_Bl)
@@ -952,7 +980,7 @@ class SDVAR(nn.Module):
 
         #############################################################
         ###### Stage 3: target_model 最终生成 (entry_num_2 -> end)
-        exit_points = [1, 5, 14, 30, 55, 91, 155, 255, 424, 680]
+
         pindex = exit_points[entry_num_2]
 
         if g_seed is not None:
