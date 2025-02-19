@@ -746,157 +746,297 @@ class SDVAR(nn.Module):
                     
         return self.target_model.vae_proxy[0].fhat_to_img(target_f_hat).add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
         
-def sdvar_autoregressive_infer_cfg_sd_tdt(
-        self,
-        B: int,
-        label_B: Optional[Union[int, torch.LongTensor]],
-        g_seed: Optional[int] = None,
-        cfg: float = 1.5,
-        top_k: int = 0,
-        top_p: float = 0.0,
-        more_smooth: bool = False,
-        entry_num_1: int = 4,  # 第一阶段：target_model 生成的层数
-        entry_num_2: int = 10  # 第二阶段：draft_model 生成到第几层后交回 target_model
-    ) -> torch.Tensor:
-    """
-    按照 target_model → draft_model → target_model 的顺序生成图片：
-      Phase 1: 使用 target_model 生成初始前缀（前 entry_num_1 层）
-      Phase 2: 使用 draft_model 对 Phase 1 的输出进行转换（从 entry_num_1 到 entry_num_2）
-      Phase 3: 使用 target_model 对 draft_model 输出继续生成，直至生成完毕
-      
-    原有的 entry_num 参数被拆分为 entry_num_1 和 entry_num_2，分别代表两个转换点对应的层数。
-    
-    :param B: batch size
-    :param label_B: imagenet label；为 None 时随机采样
-    :param g_seed: 随机种子
-    :param cfg: classifier-free guidance 比例
-    :param top_k: top-k 采样
-    :param top_p: top-p 采样
-    :param more_smooth: 是否对预测做平滑处理（仅用于可视化，不用于 FID/IS 评价）
-    :return: 生成的图片，值域 [0,1]
-    """
-    ###### 初始化公用参数
-    # 确保两模型在层数和 patch 数上匹配
-    assert self.draft_model.patch_nums == self.target_model.patch_nums
-    assert self.draft_model.num_stages_minus_1 == self.target_model.num_stages_minus_1
-    self.patch_nums = self.draft_model.patch_nums
-    self.num_stages_minus_1 = self.draft_model.num_stages_minus_1
-    total_stages = len(self.patch_nums)
-    
-    #########################################
-    ## Phase 1: target_model 生成初始前缀 ##
-    #########################################
-    if g_seed is not None:
-        self.target_model.rng.manual_seed(g_seed)
-    else:
-        self.target_model.rng = None
+    def sdvar_autoregressive_infer_cfg_sd_test(
+            self,
+            B: int,
+            label_B: Optional[Union[int, torch.LongTensor]],
+            g_seed: Optional[int] = None,
+            cfg: float = 1.5,
+            top_k: int = 0,
+            top_p: float = 0.0,
+            more_smooth: bool = False,
+            entry_num_1: int = 5,   # 第1阶段（target_model）的层数
+            entry_num_2: int = 10   # 第2阶段（draft_model）结束后转换到最终target_model的层数
+        ) -> torch.Tensor:
+        """
+        仅用于自回归推理。新的生成流程为：
+        stage1: target_model 生成初始部分（层 0 ~ entry_num_1-1）
+        stage2: draft_model 接收 stage1 的输出继续生成（层 entry_num_1 ~ entry_num_2-1）
+        stage3: target_model 最终生成剩余部分（层 entry_num_2 ~ end）
+        原有的 entry_num 被拆分为 entry_num_1 和 entry_num_2 表示两处模型转换。
+        """
+        ###### 初始化参数
+        assert self.draft_model.patch_nums == self.target_model.patch_nums
+        assert self.draft_model.num_stages_minus_1 == self.target_model.num_stages_minus_1
+        self.patch_nums = self.draft_model.patch_nums
+        self.num_stages_minus_1 = self.draft_model.num_stages_minus_1
+        total_stages = len(self.patch_nums)
 
-    target_label_B = label_B
-    if target_label_B is None:
-        target_label_B = torch.multinomial(
-            self.target_model.uniform_prob, num_samples=B, replacement=True, generator=self.target_model.rng
-        ).reshape(B)
-    elif isinstance(target_label_B, int):
-        target_label_B = torch.full(
-            (B,),
-            fill_value=self.target_model.num_classes if target_label_B < 0 else target_label_B,
-            device=self.target_model.lvl_1L.device
-        )
-
-    target_sos = target_cond_BD = self.target_model.class_emb(
-        torch.cat((target_label_B, torch.full_like(target_label_B, fill_value=self.target_model.num_classes)), dim=0)
-    )
-    target_lvl_pos = self.target_model.lvl_embed(self.target_model.lvl_1L) + self.target_model.pos_1LC
-    target_first_token_map = (
-        target_sos.unsqueeze(1).expand(2 * B, self.target_model.first_l, -1)
-        + self.target_model.pos_start.expand(2 * B, self.target_model.first_l, -1)
-        + target_lvl_pos[:, :self.target_model.first_l]
-    )
-    
-    target_cur_L = 0
-    target_f_hat = target_sos.new_zeros(B, self.target_model.Cvae, self.target_model.patch_nums[-1], self.target_model.patch_nums[-1])
-    target_cond_BD_or_gss = self.target_model.shared_ada_lin(target_cond_BD)
-    
-    # 用于收集 Phase 1 各阶段输出的 token hub（后续供 draft_model 使用）
-    target_token_hub_phase1 = []
-    
-    # 开启 kv caching
-    for blk in self.target_model.blocks:
-        blk.attn.kv_caching(True)
-    
-    # Phase 1：对 self.patch_nums 中前 entry_num_1 个阶段进行 autoregressive 生成
-    target_next_token_map = target_first_token_map  # 第一阶段输入即初始 token map
-    for si, pn in enumerate(self.patch_nums):
-        if si >= entry_num_1:
-            break
-        ratio = si / self.num_stages_minus_1
-        target_cur_L += pn * pn
-        x = target_next_token_map
-        # (调用 AdaLNSelfAttn.forward) —— 这里保持原有风格
-        for blk in self.target_model.blocks:
-            x = blk(x=x, cond_BD=target_cond_BD_or_gss, attn_bias=None)
-        target_logits_BlV = self.target_model.get_logits(x, target_cond_BD)
-        t = cfg * ratio
-        target_logits_BlV = (1 + t) * target_logits_BlV[:B] - t * target_logits_BlV[B:]
-    
-        target_idx_Bl = sample_with_top_k_top_p_(
-            target_logits_BlV, rng=self.target_model.rng, top_k=top_k, top_p=top_p, num_samples=1
-        )[:, :, 0]
-    
-        if not more_smooth:
-            target_h_BChw = self.target_model.vae_quant_proxy[0].embedding(target_idx_Bl)
+        #############################################################
+        ###### Stage 1: target_model 生成初始部分 (0 -> entry_num_1)
+        if g_seed is not None:
+            self.target_model.rng.manual_seed(g_seed)
         else:
-            target_gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)
-            target_h_BChw = gumbel_softmax_with_rng(
-                target_logits_BlV.mul(1 + ratio), tau=target_gum_t, hard=False, dim=-1, rng=self.target_model.rng
-            ) @ self.target_model.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
-    
-        target_h_BChw = target_h_BChw.transpose(1, 2).reshape(B, self.target_model.Cvae, pn, pn)
-        target_f_hat, target_next_token_map = self.target_model.vae_quant_proxy[0].get_next_autoregressive_input(
-            si, total_stages, target_f_hat, target_h_BChw
-        )
-    
-        # 除最后一次外存储 token map 作为后续 prefix
-        if si != entry_num_1 - 1:
-            next_pn = self.patch_nums[si + 1]
-            token_map = target_next_token_map.view(B, self.target_model.Cvae, -1).transpose(1, 2)
-            target_token_hub_phase1.append(token_map)
-            target_next_token_map = (
-                self.target_model.word_embed(token_map)
-                + target_lvl_pos[:, target_cur_L:target_cur_L + next_pn * next_pn]
+            self.target_model.rng = None
+
+        target_label_B = label_B
+        if target_label_B is None:
+            target_label_B = torch.multinomial(
+                self.target_model.uniform_prob, num_samples=B, replacement=True, generator=self.target_model.rng
+            ).reshape(B)
+        elif isinstance(target_label_B, int):
+            target_label_B = torch.full(
+                (B,),
+                fill_value=self.target_model.num_classes if target_label_B < 0 else target_label_B,
+                device=self.target_model.lvl_1L.device
             )
-            target_next_token_map = target_next_token_map.repeat(2, 1, 1)
-    
-    for blk in self.target_model.blocks:
-        blk.attn.kv_caching(False)
-    
-    if target_token_hub_phase1:
-        target_token_hub_phase1 = torch.cat(target_token_hub_phase1, dim=1)
-    else:
-        target_token_hub_phase1 = target_first_token_map
 
-    #####################################################
-    ## Phase 2: draft_model 对 Phase 1 输出进行转换 ##
-    #####################################################
-    if g_seed is not None:
-        self.draft_model.rng.manual_seed(g_seed)
-    else:
-        self.draft_model.rng = None
-
-    draft_label_B = label_B
-    if draft_label_B is None:
-        draft_label_B = torch.multinomial(
-            self.draft_model.uniform_prob, num_samples=B, replacement=True, generator=self.draft_model.rng
-        ).reshape(B)
-    elif isinstance(draft_label_B, int):
-        draft_label_B = torch.full(
-            (B,),
-            fill_value=self.draft_model.num_classes if draft_label_B < 0 else draft_label_B,
-            device=self.draft_model.lvl_1L.device
+        target_sos = target_cond_BD = self.target_model.class_emb(
+            torch.cat((target_label_B, torch.full_like(target_label_B, fill_value=self.target_model.num_classes)), dim=0)
         )
+        target_lvl_pos = self.target_model.lvl_embed(self.target_model.lvl_1L) + self.target_model.pos_1LC
+        target_first_token_map = (
+            target_sos.unsqueeze(1).expand(2 * B, self.target_model.first_l, -1)
+            + self.target_model.pos_start.expand(2 * B, self.target_model.first_l, -1)
+            + target_lvl_pos[:, :self.target_model.first_l]
+        )
+        target_cur_L = 0
+        target_f_hat = target_sos.new_zeros(B, self.target_model.Cvae,
+                                            self.target_model.patch_nums[-1],
+                                            self.target_model.patch_nums[-1])
+        target_cond_BD_or_gss = self.target_model.shared_ada_lin(target_cond_BD)
 
-    draft_sos = draft_cond_BD = self.draft_model.class_emb(
-        torch.cat(draft_label_B, torch.full_like(draft_label_B, fill_value=self.draft_model.num_classes)))
+        for blk in self.target_model.blocks:
+            blk.attn.kv_caching(True)
+
+        target_token_hub_stage1 = []
+        for si, pn in enumerate(self.patch_nums):
+            if si >= entry_num_1:
+                break
+
+            ratio = si / self.num_stages_minus_1
+            target_cur_L += pn * pn
+            x = target_first_token_map if si == 0 else target_next_token_map
+            for blk in self.target_model.blocks:
+                x = blk(x=x, cond_BD=target_cond_BD_or_gss, attn_bias=None)
+            target_logits_BlV = self.target_model.get_logits(x, target_cond_BD)
+            t = cfg * ratio
+            target_logits_BlV = (1 + t) * target_logits_BlV[:B] - t * target_logits_BlV[B:]
+            target_idx_Bl = sample_with_top_k_top_p_(
+                target_logits_BlV, rng=self.target_model.rng, top_k=top_k, top_p=top_p, num_samples=1
+            )[:, :, 0]
+
+            if not more_smooth:
+                target_h_BChw = self.target_model.vae_quant_proxy[0].embedding(target_idx_Bl)
+            else:
+                target_gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)
+                target_h_BChw = gumbel_softmax_with_rng(
+                    target_logits_BlV.mul(1 + ratio), tau=target_gum_t, hard=False, dim=-1, rng=self.target_model.rng
+                ) @ self.target_model.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
+
+            target_h_BChw = target_h_BChw.transpose(1, 2).reshape(B, self.target_model.Cvae, pn, pn)
+            target_f_hat, target_next_token_map = self.target_model.vae_quant_proxy[0].get_next_autoregressive_input(
+                si, total_stages, target_f_hat, target_h_BChw
+            )
+            if si != self.num_stages_minus_1:   # prepare for next stage
+                next_pn = self.patch_nums[si + 1]
+                target_next_token_map = target_next_token_map.view(B, self.target_model.Cvae, -1).transpose(1, 2)
+                target_token_hub_stage1.append(target_next_token_map)
+                target_next_token_map = (
+                    self.target_model.word_embed(target_next_token_map)
+                    + target_lvl_pos[:, target_cur_L:target_cur_L + next_pn * next_pn]
+                )
+                target_next_token_map = target_next_token_map.repeat(2, 1, 1)
+        for blk in self.target_model.blocks:
+            blk.attn.kv_caching(False)
+        target_token_hub_stage1 = torch.cat(target_token_hub_stage1, dim=1)
+
+        #############################################################
+        ###### Stage 2: draft_model 生成中间部分 (entry_num_1 -> entry_num_2)
+        if g_seed is not None:
+            self.draft_model.rng.manual_seed(g_seed)
+        else:
+            self.draft_model.rng = None
+
+        draft_label_B = label_B
+        if draft_label_B is None:
+            draft_label_B = torch.multinomial(
+                self.draft_model.uniform_prob, num_samples=B, replacement=True, generator=self.draft_model.rng
+            ).reshape(B)
+        elif isinstance(draft_label_B, int):
+            draft_label_B = torch.full(
+                (B,),
+                fill_value=self.draft_model.num_classes if draft_label_B < 0 else draft_label_B,
+                device=self.draft_model.lvl_1L.device
+            )
+
+        draft_sos = draft_cond_BD = self.draft_model.class_emb(
+            torch.cat((draft_label_B, torch.full_like(draft_label_B, fill_value=self.draft_model.num_classes)), dim=0)
+        )
+        draft_lvl_pos = self.draft_model.lvl_embed(self.draft_model.lvl_1L) + self.draft_model.pos_1LC
+        # 用 Stage1 输出初始化 draft 模型的输入（类似于原先 draft 模型的 sos）
+        draft_first_token_map = (
+            draft_sos.unsqueeze(1).expand(2 * B, self.draft_model.first_l, -1)
+            + self.draft_model.pos_start.expand(2 * B, self.draft_model.first_l, -1)
+            + draft_lvl_pos[:, :self.draft_model.first_l]
+        )
+        # 将 target_model 生成的 prefix 经 word_embed 转换到 draft_model 的空间
+        draft_prefix = self.draft_model.word_embed(target_token_hub_stage1) \
+                    + draft_lvl_pos[:, 1:target_token_hub_stage1.size(1) + 1]
+        draft_next_token_map = torch.cat([draft_first_token_map, draft_prefix], dim=1)
+        draft_cur_L = 0
+        draft_f_hat = draft_sos.new_zeros(B, self.draft_model.Cvae,
+                                        self.draft_model.patch_nums[-1],
+                                        self.draft_model.patch_nums[-1])
+        draft_cond_BD_or_gss = self.draft_model.shared_ada_lin(draft_cond_BD)
+
+        draft_token_hub = []
+        for blk in self.draft_model.blocks:
+            blk.attn.kv_caching(True)
+        for si, pn in enumerate(self.patch_nums):
+            if si < entry_num_1:
+                continue
+            if si >= entry_num_2:
+                break
+            ratio = si / self.num_stages_minus_1
+            draft_cur_L += pn * pn
+            x = draft_next_token_map
+            for blk in self.draft_model.blocks:
+                x = blk(x=x, cond_BD=draft_cond_BD_or_gss, attn_bias=None)
+            draft_logits_BlV = self.draft_model.get_logits(x, draft_cond_BD)
+            t = cfg * ratio
+            draft_logits_BlV = (1 + t) * draft_logits_BlV[:B] - t * draft_logits_BlV[B:]
+            draft_idx_Bl = sample_with_top_k_top_p_(
+                draft_logits_BlV, rng=self.draft_model.rng, top_k=top_k, top_p=top_p, num_samples=1
+            )[:, :, 0]
+
+            if not more_smooth:
+                draft_h_BChw = self.draft_model.vae_quant_proxy[0].embedding(draft_idx_Bl)
+            else:
+                draft_gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)
+                draft_h_BChw = gumbel_softmax_with_rng(
+                    draft_logits_BlV.mul(1 + ratio), tau=draft_gum_t, hard=False, dim=-1, rng=self.draft_model.rng
+                ) @ self.draft_model.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
+
+            draft_h_BChw = draft_h_BChw.transpose(1, 2).reshape(B, self.draft_model.Cvae, pn, pn)
+            draft_f_hat, draft_next_token_map = self.draft_model.vae_quant_proxy[0].get_next_autoregressive_input(
+                si, total_stages, draft_f_hat, draft_h_BChw
+            )
+            if si != self.num_stages_minus_1:
+                next_pn = self.patch_nums[si + 1]
+                draft_next_token_map = draft_next_token_map.view(B, self.draft_model.Cvae, -1).transpose(1, 2)
+                draft_token_hub.append(draft_next_token_map)
+                draft_next_token_map = (
+                    self.draft_model.word_embed(draft_next_token_map)
+                    + draft_lvl_pos[:, draft_cur_L: draft_cur_L + next_pn * next_pn]
+                )
+                draft_next_token_map = draft_next_token_map.repeat(2, 1, 1)
+        for blk in self.draft_model.blocks:
+            blk.attn.kv_caching(False)
+        draft_token_hub = torch.cat(draft_token_hub, dim=1)
+
+        #############################################################
+        ###### Stage 3: target_model 最终生成 (entry_num_2 -> end)
+        exit_points = [1, 5, 14, 30, 55, 91, 155, 255, 424, 680]
+        pindex = exit_points[entry_num_2]
+
+        if g_seed is not None:
+            self.target_model.rng.manual_seed(g_seed)
+        else:
+            self.target_model.rng = None
+
+        target_label_B = label_B
+        if target_label_B is None:
+            target_label_B = torch.multinomial(
+                self.target_model.uniform_prob, num_samples=B, replacement=True, generator=self.target_model.rng
+            ).reshape(B)
+        elif isinstance(target_label_B, int):
+            target_label_B = torch.full(
+                (B,),
+                fill_value=self.target_model.num_classes if target_label_B < 0 else target_label_B,
+                device=self.target_model.lvl_1L.device
+            )
+
+        target_sos = target_cond_BD = self.target_model.class_emb(
+            torch.cat((target_label_B, torch.full_like(target_label_B, fill_value=self.target_model.num_classes)), dim=0)
+        )
+        target_lvl_pos = self.target_model.lvl_embed(self.target_model.lvl_1L) + self.target_model.pos_1LC
+        target_first_token_map = (
+            target_sos.unsqueeze(1).expand(2 * B, self.target_model.first_l, -1)
+            + self.target_model.pos_start.expand(2 * B, self.target_model.first_l, -1)
+            + target_lvl_pos[:, :self.target_model.first_l]
+        )
+        # 使用 draft_model 的输出作为 prefix
+        target_token_hub = draft_token_hub
+        target_next_token_map = self.target_model.word_embed(target_token_hub) + target_lvl_pos[:, 1:pindex]
+        target_next_token_map = target_next_token_map.repeat(2, 1, 1)
+        target_next_token_map = torch.cat([target_first_token_map, target_next_token_map], dim=1)
+        target_cur_L = 0
+        target_f_hat = target_sos.new_zeros(B, self.target_model.Cvae,
+                                            self.target_model.patch_nums[-1],
+                                            self.target_model.patch_nums[-1])
+        target_cond_BD_or_gss = self.target_model.shared_ada_lin(target_cond_BD)
+        attn_bias = self.target_model.attn_bias_for_masking[:, :, 0:pindex, 0:pindex]
+        for blk in self.target_model.blocks:
+            blk.attn.kv_caching(True)
+        for si, pn in enumerate(self.patch_nums):
+            if si < entry_num_2:
+                continue
+            ratio = si / self.num_stages_minus_1
+            target_cur_L += pn * pn
+            t = cfg * ratio
+            x = target_next_token_map
+            if si == entry_num_2:
+                for b in self.target_model.blocks:
+                    x = b(x=x, cond_BD=target_cond_BD_or_gss, attn_bias=attn_bias)
+                target_logits_BlV = self.target_model.get_logits(x, target_cond_BD)
+                target_logits_BlV[:B, target_cur_L - pn * pn: target_cur_L] = (
+                    (1 + t) * target_logits_BlV[:B, target_cur_L - pn * pn: target_cur_L]
+                    - t * target_logits_BlV[B:, target_cur_L - pn * pn: target_cur_L]
+                )
+                new_L = 0
+                for a, b in enumerate(self.patch_nums[0:entry_num_2 + 1]):
+                    target_idx_Bl = sample_with_top_k_top_p_(
+                        target_logits_BlV[:B, new_L:new_L + self.patch_nums[a] ** 2],
+                        rng=self.target_model.rng,
+                        top_k=top_k,
+                        top_p=top_p,
+                        num_samples=1
+                    )[:, :, 0]
+                    new_L += b * b
+                target_logits_BlV = target_logits_BlV[:B, target_cur_L - pn * pn: target_cur_L]
+            elif si > entry_num_2:
+                for b in self.target_model.blocks:
+                    x = b(x=x, cond_BD=target_cond_BD_or_gss, attn_bias=None)
+                target_logits_BlV = self.target_model.get_logits(x, target_cond_BD)
+                target_logits_BlV = (1 + t) * target_logits_BlV[:B] - t * target_logits_BlV[B:]
+                target_idx_Bl = sample_with_top_k_top_p_(
+                    target_logits_BlV, rng=self.target_model.rng, top_k=top_k, top_p=top_p, num_samples=1
+                )[:, :, 0]
+            if not more_smooth:
+                target_h_BChw = self.target_model.vae_quant_proxy[0].embedding(target_idx_Bl)
+            else:
+                target_gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)
+                target_h_BChw = gumbel_softmax_with_rng(
+                    target_logits_BlV.mul(1 + ratio), tau=target_gum_t, hard=False, dim=-1, rng=self.target_model.rng
+                ) @ self.target_model.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
+            target_h_BChw = target_h_BChw.transpose(1, 2).reshape(B, self.target_model.Cvae, pn, pn)
+            target_f_hat, target_next_token_map = self.target_model.vae_quant_proxy[0].get_next_autoregressive_input(
+                si, len(self.patch_nums), target_f_hat, target_h_BChw
+            )
+            if si != self.num_stages_minus_1:
+                next_pn = self.patch_nums[si + 1]
+                target_next_token_map = target_next_token_map.view(B, self.target_model.Cvae, -1).transpose(1, 2)
+                target_next_token_map = (
+                    self.target_model.word_embed(target_next_token_map)
+                    + target_lvl_pos[:, target_cur_L:target_cur_L + next_pn * next_pn]
+                )
+                target_next_token_map = target_next_token_map.repeat(2, 1, 1)
+        for blk in self.target_model.blocks:
+            blk.attn.kv_caching(False)
+
+        return self.target_model.vae_proxy[0].fhat_to_img(target_f_hat).add_(1).mul_(0.5)
+
 
 
 
