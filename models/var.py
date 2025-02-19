@@ -679,6 +679,7 @@ class SDVAR(nn.Module):
         
 
         # 接受之前生成的做为target_model输出的prefix
+        print(target_token_hub.shape)
         target_next_token_map = target_token_hub
         target_next_token_map = self.target_model.word_embed(target_next_token_map) + target_lvl_pos[:,1:pindex]  
         target_next_token_map = target_next_token_map.repeat(2, 1, 1)   # double the batch sizes due to CFG
