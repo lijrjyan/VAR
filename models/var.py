@@ -746,7 +746,7 @@ class SDVAR(nn.Module):
                     
         return self.target_model.vae_proxy[0].fhat_to_img(target_f_hat).add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
         
-    def sdvar_autoregressive_infer_cfg_sd_test(
+    def sdvar_autoregressive_infer_cfg_sd_tdt(
             self,
             B: int,
             label_B: Optional[Union[int, torch.LongTensor]],
