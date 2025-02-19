@@ -1065,7 +1065,7 @@ class SDVAR(nn.Module):
             torch.cat((target_label_B, torch.full_like(target_label_B, fill_value=self.target_model.num_classes)), dim=0)
         )
         # target_lvl_pos = self.target_model.lvl_embed(self.target_model.lvl_1L) + self.target_model.pos_1LC
-        target_token_hub = draft_token_hub
+        target_token_hub = torch.cat([target_token_hub_stage1,draft_token_hub], dim = 1)
         
         target_first_token_map = target_sos.unsqueeze(1).expand(2 * B, self.target_model.first_l, -1) \
             + self.target_model.pos_start.expand(2 * B, self.target_model.first_l, -1) \
