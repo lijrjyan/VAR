@@ -683,7 +683,8 @@ class SDVAR(nn.Module):
         target_next_token_map = self.target_model.word_embed(target_next_token_map) + target_lvl_pos[:,1:pindex]  
         target_next_token_map = target_next_token_map.repeat(2, 1, 1)   # double the batch sizes due to CFG
         target_next_token_map = torch.cat([target_first_token_map,target_next_token_map],dim=1)
-
+        print(self.target_model.word_embed(target_token_hub).shape,flush=True)
+        print(target_lvl_pos[:, 1:pindex2].shape,flush=True)
         attn_bias = self.target_model.attn_bias_for_masking[:,:,0:pindex,0:pindex]
         
         for blk in self.target_model.blocks:
@@ -1025,6 +1026,12 @@ class SDVAR(nn.Module):
                     + draft_lvl_pos[:, draft_cur_L: draft_cur_L + next_pn * next_pn]
                 )
                 draft_next_token_map = draft_next_token_map.repeat(2, 1, 1)
+            
+            if si == self.num_stages_minus_1:
+                for blk in self.draft_model.blocks:
+                    blk.attn.kv_caching(False)
+                return self.draft_model.vae_proxy[0].fhat_to_img(draft_f_hat).add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
+        
         for blk in self.draft_model.blocks:
             blk.attn.kv_caching(False)
         draft_token_hub = torch.cat(draft_token_hub, dim=1)
