@@ -771,7 +771,9 @@ class SDVAR(nn.Module):
             blk.attn.kv_caching(False)   
                     
         return self.target_model.vae_proxy[0].fhat_to_img(target_f_hat).add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
-        
+    
+    
+    torch.no_grad()
     def sdvar_autoregressive_infer_cfg_sd_tdt(
             self,
             B: int,
@@ -1013,7 +1015,7 @@ class SDVAR(nn.Module):
             draft_f_hat, draft_next_token_map = self.draft_model.vae_quant_proxy[0].get_next_autoregressive_input(
                 si, total_stages, draft_f_hat, draft_h_BChw
             )
-            
+
             if si != self.num_stages_minus_1:
                 next_pn = self.patch_nums[si + 1]
                 draft_next_token_map = draft_next_token_map.view(B, self.draft_model.Cvae, -1).transpose(1, 2)
@@ -1026,11 +1028,12 @@ class SDVAR(nn.Module):
         for blk in self.draft_model.blocks:
             blk.attn.kv_caching(False)
         draft_token_hub = torch.cat(draft_token_hub, dim=1)
+        print(len(draft_token_hub),flush=True)
 
         #############################################################
         ###### Stage 3: target_model 最终生成 (entry_num_2 -> end)
 
-        pindex = exit_points[entry_num_2]
+        pindex2 = exit_points[entry_num_2]
 
         if g_seed is not None:
             self.target_model.rng.manual_seed(g_seed)
@@ -1060,7 +1063,7 @@ class SDVAR(nn.Module):
         )
         # 使用 draft_model 的输出作为 prefix
         target_token_hub = draft_token_hub
-        target_next_token_map = self.target_model.word_embed(target_token_hub) + target_lvl_pos[:, 1:pindex]
+        target_next_token_map = self.target_model.word_embed(target_token_hub) + target_lvl_pos[:, 1:pindex2]
         target_next_token_map = target_next_token_map.repeat(2, 1, 1)
         target_next_token_map = torch.cat([target_first_token_map, target_next_token_map], dim=1)
         target_cur_L = 0
