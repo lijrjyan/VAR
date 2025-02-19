@@ -1028,7 +1028,7 @@ class SDVAR(nn.Module):
         for blk in self.draft_model.blocks:
             blk.attn.kv_caching(False)
         draft_token_hub = torch.cat(draft_token_hub, dim=1)
-        print(len(draft_token_hub),flush=True)
+        print(draft_token_hub.shape,flush=True)
 
         #############################################################
         ###### Stage 3: target_model 最终生成 (entry_num_2 -> end)
@@ -1061,7 +1061,7 @@ class SDVAR(nn.Module):
             + self.target_model.pos_start.expand(2 * B, self.target_model.first_l, -1)
             + target_lvl_pos[:, :self.target_model.first_l]
         )
-        
+
         # 使用 draft_model 的输出作为 prefix
         target_token_hub = draft_token_hub
         target_next_token_map = self.target_model.word_embed(target_token_hub) + target_lvl_pos[:, 1:pindex2]
