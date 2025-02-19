@@ -684,7 +684,7 @@ class SDVAR(nn.Module):
         target_next_token_map = target_next_token_map.repeat(2, 1, 1)   # double the batch sizes due to CFG
         target_next_token_map = torch.cat([target_first_token_map,target_next_token_map],dim=1)
         print(self.target_model.word_embed(target_token_hub).shape,flush=True)
-        print(target_lvl_pos[:, 1:pindex2].shape,flush=True)
+        print(target_lvl_pos[:, 1:pindex].shape,flush=True)
         attn_bias = self.target_model.attn_bias_for_masking[:,:,0:pindex,0:pindex]
         
         for blk in self.target_model.blocks:
