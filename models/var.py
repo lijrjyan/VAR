@@ -1071,6 +1071,8 @@ class SDVAR(nn.Module):
         target_cond_BD_or_gss = self.target_model.shared_ada_lin(target_cond_BD)
 
         # 使用 draft_model 的输出作为 prefix
+        print(self.target_model.word_embed(target_token_hub).shape,flush=True)
+        print(target_lvl_pos[:, 1:pindex2],flush=True)
         target_next_token_map = self.target_model.word_embed(target_token_hub) + target_lvl_pos[:, 1:pindex2]
         target_next_token_map = target_next_token_map.repeat(2, 1, 1)
         target_next_token_map = torch.cat([target_first_token_map, target_next_token_map], dim=1)
