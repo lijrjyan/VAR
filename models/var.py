@@ -1061,6 +1061,7 @@ class SDVAR(nn.Module):
             + self.target_model.pos_start.expand(2 * B, self.target_model.first_l, -1)
             + target_lvl_pos[:, :self.target_model.first_l]
         )
+        
         # 使用 draft_model 的输出作为 prefix
         target_token_hub = draft_token_hub
         target_next_token_map = self.target_model.word_embed(target_token_hub) + target_lvl_pos[:, 1:pindex2]
@@ -1071,7 +1072,7 @@ class SDVAR(nn.Module):
                                             self.target_model.patch_nums[-1],
                                             self.target_model.patch_nums[-1])
         target_cond_BD_or_gss = self.target_model.shared_ada_lin(target_cond_BD)
-        attn_bias = self.target_model.attn_bias_for_masking[:, :, 0:pindex, 0:pindex]
+        attn_bias = self.target_model.attn_bias_for_masking[:, :, 0:pindex2, 0:pindex2]
         for blk in self.target_model.blocks:
             blk.attn.kv_caching(True)
         for si, pn in enumerate(self.patch_nums):
