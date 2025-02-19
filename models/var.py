@@ -589,14 +589,20 @@ class SDVAR(nn.Module):
             draft_logits_BlV = (1+t)*draft_logits_BlV[:B] - t*draft_logits_BlV[B:]  # (B, l, V)
 
             draft_idx_Bl = sample_with_top_k_top_p_(
-                draft_logits_BlV, rng=self.draft_model.rng, top_k=top_k, top_p=top_p, num_samples=1
+                draft_logits_BlV,
+                rng=self.draft_model.rng,
+                top_k=top_k,
+                top_p=top_p,
+                num_samples=1
             )[:, :, 0]
 
             if not more_smooth:
                 draft_h_BChw = self.draft_model.vae_quant_proxy[0].embedding(draft_idx_Bl)
             else:
                 draft_gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)
-                draft_h_BChw = gumbel_softmax_with_rng(draft_logits_BlV.mul(1 + ratio), tau=draft_gum_t, hard=False, dim=-1, rng=self.draft_model.rng) @ self.draft_model.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
+                draft_h_BChw = gumbel_softmax_with_rng(
+                    draft_logits_BlV.mul(1 + ratio), tau=draft_gum_t, hard=False, dim=-1, rng=self.draft_model.rng
+                    ) @ self.draft_model.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
             
             draft_h_BChw = draft_h_BChw.transpose(1,2).reshape(B, self.draft_model.Cvae, pn, pn)
 
@@ -660,7 +666,9 @@ class SDVAR(nn.Module):
             + target_lvl_pos[:, :self.target_model.first_l]
         
         target_cur_L = 0
-        target_f_hat = target_sos.new_zeros(B, self.target_model.Cvae, self.target_model.patch_nums[-1], self.target_model.patch_nums[-1])
+        target_f_hat = target_sos.new_zeros(B, self.target_model.Cvae,
+                                            self.target_model.patch_nums[-1],
+                                            self.target_model.patch_nums[-1])
 
         target_cond_BD_or_gss = self.target_model.shared_ada_lin(target_cond_BD)
         
@@ -681,7 +689,7 @@ class SDVAR(nn.Module):
             target_cur_L += pn*pn
             t = cfg * ratio 
             
-            if si<entry_num:
+            if si < entry_num:
                 continue
 
             x = target_next_token_map
@@ -895,20 +903,26 @@ class SDVAR(nn.Module):
         for blk in self.draft_model.blocks:
             blk.attn.kv_caching(True)
         for si, pn in enumerate(self.patch_nums):
+            ratio = si / self.num_stages_minus_1
+            draft_cur_L += pn * pn
             if si < entry_num_1:
                 continue
             if si >= entry_num_2:
                 break
-            ratio = si / self.num_stages_minus_1
-            draft_cur_L += pn * pn
+
             x = draft_next_token_map
             for blk in self.draft_model.blocks:
                 x = blk(x=x, cond_BD=draft_cond_BD_or_gss, attn_bias=None)
             draft_logits_BlV = self.draft_model.get_logits(x, draft_cond_BD)
+
             t = cfg * ratio
             draft_logits_BlV = (1 + t) * draft_logits_BlV[:B] - t * draft_logits_BlV[B:]
             draft_idx_Bl = sample_with_top_k_top_p_(
-                draft_logits_BlV, rng=self.draft_model.rng, top_k=top_k, top_p=top_p, num_samples=1
+                draft_logits_BlV, 
+                rng=self.draft_model.rng, 
+                top_k=top_k, 
+                top_p=top_p, 
+                num_samples=1
             )[:, :, 0]
 
             if not more_smooth:
