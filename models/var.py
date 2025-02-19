@@ -896,7 +896,7 @@ def sdvar_autoregressive_infer_cfg_sd_tdt(
         )
 
     draft_sos = draft_cond_BD = self.draft_model.class_emb(
-        torch.cat((draft_label_B, torch.full_like(draft_label_B, fill_value=self.draft_model.num_classes
+        torch.cat(draft_label_B, torch.full_like(draft_label_B, fill_value=self.draft_model.num_classes)))
 
 
 
