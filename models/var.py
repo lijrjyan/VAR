@@ -883,7 +883,7 @@ class SDVAR(nn.Module):
         # 将 target_model 生成的 prefix 经 word_embed 转换到 draft_model 的空间
         draft_prefix = self.draft_model.word_embed(target_token_hub_stage1) \
                     + draft_lvl_pos[:, 1:target_token_hub_stage1.size(1) + 1]
-        draft_prefix = draft_prefix.repeat(2,1)
+        draft_prefix = draft_prefix.repeat(2,1,1)
         draft_next_token_map = torch.cat([draft_first_token_map, draft_prefix], dim=1)
         draft_cur_L = 0
         draft_f_hat = draft_sos.new_zeros(B, self.draft_model.Cvae,
