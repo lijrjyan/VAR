@@ -736,7 +736,9 @@ class SDVAR(nn.Module):
                 target_h_BChw = self.target_model.vae_quant_proxy[0].embedding(target_idx_Bl)   # B, l, Cvae
             else:   # not used when evaluating FID/IS/Precision/Recall
                 target_gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)   # refer to mask-git
-                target_h_BChw = gumbel_softmax_with_rng(target_logits_BlV.mul(1 + ratio), tau=target_gum_t, hard=False, dim=-1, rng=self.target_model.rng) @ self.target_model.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
+                target_h_BChw = gumbel_softmax_with_rng(
+                    target_logits_BlV.mul(1 + ratio), tau=target_gum_t, hard=False, dim=-1, rng=self.target_model.rng
+                    ) @ self.target_model.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
 
             target_h_BChw = target_h_BChw.transpose_(1, 2).reshape(B, self.target_model.Cvae, pn, pn)
 
@@ -894,7 +896,7 @@ class SDVAR(nn.Module):
         )
         # 将 target_model 生成的 prefix 经 word_embed 转换到 draft_model 的空间
         draft_prefix = self.draft_model.word_embed(target_token_hub_stage1) \
-                    + draft_lvl_pos[:, 1:target_token_hub_stage1.size(1) + 1]
+                    + draft_lvl_pos[:, 1:pindex1]
         draft_prefix = draft_prefix.repeat(2,1,1)
         draft_next_token_map = torch.cat([draft_first_token_map, draft_prefix], dim=1)
         draft_cur_L = 0
@@ -908,6 +910,7 @@ class SDVAR(nn.Module):
         draft_token_hub = []
         for blk in self.draft_model.blocks:
             blk.attn.kv_caching(True)
+
         for si, pn in enumerate(self.patch_nums):
             ratio = si / self.num_stages_minus_1
             draft_cur_L += pn * pn
@@ -915,7 +918,7 @@ class SDVAR(nn.Module):
             
             if si < entry_num_1:
                 continue
-            if si >= entry_num_2:
+            if si == entry_num_2:
                 break
 
             x = draft_next_token_map
@@ -943,6 +946,7 @@ class SDVAR(nn.Module):
                     new_L += b*b
                 
                 draft_logits_BlV = draft_logits_BlV[:B,draft_cur_L-pn*pn:draft_cur_L]
+
             elif si > entry_num_2:
                 draft_logits_BlV = (1 + t) * draft_logits_BlV[:B] - t * draft_logits_BlV[B:]
                 draft_idx_Bl = sample_with_top_k_top_p_(
@@ -962,6 +966,7 @@ class SDVAR(nn.Module):
                 ) @ self.draft_model.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
 
             draft_h_BChw = draft_h_BChw.transpose(1, 2).reshape(B, self.draft_model.Cvae, pn, pn)
+
             draft_f_hat, draft_next_token_map = self.draft_model.vae_quant_proxy[0].get_next_autoregressive_input(
                 si, total_stages, draft_f_hat, draft_h_BChw
             )
