@@ -772,8 +772,282 @@ class SDVAR(nn.Module):
             blk.attn.kv_caching(False)   
                     
         return self.target_model.vae_proxy[0].fhat_to_img(target_f_hat).add_(1).mul_(0.5)   # de-normalize, from [-1, 1] to [0, 1]
-    
-    
+
+    @torch.no_grad()
+    def sdvar_autoregressive_infer_cfg_sd_warmup(
+        self,
+        B: int,
+        label_B: Optional[Union[int, torch.LongTensor]],
+        g_seed: Optional[int] = None,
+        cfg: float = 1.5,
+        top_k: int = 0,
+        top_p: float = 0.0,
+        more_smooth: bool = False,
+        gamma: int = 10,
+        warmup_steps: int = 5  # 最开始由 target_model 生成的层数,效果类似entry_num
+    ) -> torch.Tensor:
+        """
+        only used for inference, on autoregressive mode
+        :param B: batch size
+        :param label_B: imagenet label; if None, randomly sampled
+        :param g_seed: random seed
+        :param cfg: classifier-free guidance ratio
+        这里可以考虑 top_k, top_p 是否需要将 target_model 和 draft_model 分开设置
+        :param top_k: top-k sampling
+        :param top_p: top-p sampling
+        :param more_smooth: 是否使用 gumbel softmax 平滑预测（仅用于可视化，不用于 FID/IS 评价）
+        :param gamma: draft_model 每次向前预测的层数
+        :param warmup_steps: 最开始 target_model 预测的层数
+        :return: 最终生成的图像
+        """
+        ######################################
+        # 初始化参数：patch_nums、随机种子、标签等
+        ######################################
+        assert self.draft_model.patch_nums == self.target_model.patch_nums
+        assert self.draft_model.num_stages_minus_1 == self.target_model.num_stages_minus_1
+        self.patch_nums = self.draft_model.patch_nums
+        self.num_stages_minus_1 = self.draft_model.num_stages_minus_1
+
+        if g_seed is not None:
+            self.draft_model.rng.manual_seed(g_seed)
+            self.target_model.rng.manual_seed(g_seed)
+            rng = self.draft_model.rng
+        else:
+            rng = None
+
+        if label_B is None:
+            label_B = torch.multinomial(
+                self.draft_model.uniform_prob, num_samples=B, replacement=True, generator=rng
+            ).reshape(B)
+        elif isinstance(label_B, int):
+            label_B = torch.full(
+                (B,),
+                fill_value=self.draft_model.num_classes if label_B < 0 else label_B,
+                device=self.draft_model.lvl_1L.device
+            )
+
+        ######################################
+        # 初始化 draft_model 的输入（非共享部分）
+        ######################################
+        draft_sos = draft_cond_BD = self.draft_model.class_emb(
+            torch.cat((label_B, torch.full_like(label_B, fill_value=self.draft_model.num_classes)), dim=0)
+        )  # shape: (2B, C)
+        draft_cond_BD_or_gss = self.draft_model.shared_ada_lin(draft_cond_BD)
+        draft_lvl_pos = self.draft_model.lvl_embed(self.draft_model.lvl_1L) + self.draft_model.pos_1LC
+        draft_first_token_map = (
+            draft_sos.unsqueeze(1).expand(2 * B, self.draft_model.first_l, -1)
+            + self.draft_model.pos_start.expand(2 * B, self.draft_model.first_l, -1)
+            + draft_lvl_pos[:, :self.draft_model.first_l]
+        )
+        # 草稿生成过程中的 f_hat（最终不用于生成图像，仅占位）
+        draft_f_hat = draft_sos.new_zeros(B, self.draft_model.Cvae,
+                                        self.draft_model.patch_nums[-1],
+                                        self.draft_model.patch_nums[-1])
+
+        ######################################
+        # 初始化 target_model 的输入
+        ######################################
+        target_sos = target_cond_BD = self.target_model.class_emb(
+            torch.cat((label_B, torch.full_like(label_B, fill_value=self.target_model.num_classes)), dim=0)
+        )
+        target_cond_BD_or_gss = self.target_model.shared_ada_lin(target_cond_BD)
+        target_lvl_pos = self.target_model.lvl_embed(self.target_model.lvl_1L) + self.target_model.pos_1LC
+        target_first_token_map = (
+            target_sos.unsqueeze(1).expand(2 * B, self.target_model.first_l, -1)
+            + self.target_model.pos_start.expand(2 * B, self.target_model.first_l, -1)
+            + target_lvl_pos[:, :self.target_model.first_l]
+        )
+        target_f_hat = target_sos.new_zeros(B, self.target_model.Cvae,
+                                            self.target_model.patch_nums[-1],
+                                            self.target_model.patch_nums[-1])
+
+        ######################################
+        # 计算每一阶段结束时 token 的累积数量（exit_points）
+        ######################################
+        self.exit_points = [0] * len(self.patch_nums)
+        self.exit_points[0] = self.patch_nums[0] ** 2
+        for i in range(1, len(self.patch_nums)):
+            self.exit_points[i] = self.exit_points[i - 1] + self.patch_nums[i] ** 2
+
+        ######################################
+        # Warmup 阶段：先用 target_model 生成 warmup_steps 层
+        ######################################
+        target_token_hub = []
+        target_next_token_map = target_first_token_map  # 初始输入
+        current_L = 0
+        for si, pn in enumerate(self.patch_nums):
+            if si >= warmup_steps:
+                break
+            ratio = si / self.num_stages_minus_1
+            current_L += pn * pn
+            x = target_next_token_map
+            # 对 target_model 的每个 block 做前向传播（假设内部已调用 AdaLNSelfAttn.forward）
+            for blk in self.target_model.blocks:
+                x = blk(x=x, cond_BD=target_cond_BD_or_gss, attn_bias=None)
+            logits = self.target_model.get_logits(x, target_cond_BD)
+            t = cfg * ratio
+            # 对 logits 进行 CFG 调整（注意取前 B 部分与后 B 部分的区分）
+            # cfg调整如何调整到外侧？值得考虑的点
+            logits = (1 + t) * logits[:B, current_L - pn * pn:current_L] - t * logits[B:, current_L - pn * pn:current_L]
+            idx = sample_with_top_k_top_p_(logits, rng=self.target_model.rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0]
+            if not more_smooth:
+                h_BChw = self.target_model.vae_quant_proxy[0].embedding(idx)
+            else:
+                gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)
+                h_BChw = gumbel_softmax_with_rng(
+                    logits.mul(1 + ratio), tau=gum_t, hard=False, dim=-1, rng=self.target_model.rng
+                ) @ self.target_model.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
+            h_BChw = h_BChw.transpose(1, 2).reshape(B, self.target_model.Cvae, pn, pn)
+            target_f_hat, target_next_token_map = self.target_model.vae_quant_proxy[0].get_next_autoregressive_input(
+                si, len(self.patch_nums), target_f_hat, h_BChw
+            )
+            # 收集每阶段生成的 token（供后续投影到 draft_model 时使用）
+            token_map = target_next_token_map.view(B, self.target_model.Cvae, -1).transpose(1, 2)
+            target_token_hub.append(token_map)
+            # POSSIBLE BUG 这里是可能的 Bug，一般是总体的num_minus_1这里是warmup_step-1
+            if si < warmup_steps - 1:
+                next_pn = self.patch_nums[si + 1]
+                target_next_token_map = (
+                    self.target_model.word_embed(token_map)
+                    + target_lvl_pos[:, current_L: current_L + next_pn * next_pn]
+                )
+                target_next_token_map = target_next_token_map.repeat(2, 1, 1)
+        # 合并 warmup 阶段 token
+        target_token_hub = torch.cat(target_token_hub, dim=1)
+
+        # 设置草稿阶段已接受的层数及 token（初始阶段为 warmup_steps 生成的部分）
+        accept_si = warmup_steps
+        accept_L = current_L
+        accept_token_hub = target_token_hub
+
+        ######################################
+        # 开启 KV cache
+        ######################################
+        for blk in self.draft_model.blocks:
+            blk.attn.kv_caching(True)
+        for blk in self.target_model.blocks:
+            blk.attn.kv_caching(True)
+
+        ######################################
+        # 循环：草稿生成（draft）—验证（target_model）
+        ######################################
+        while accept_si < self.num_stages_minus_1:
+            local_si = accept_si
+            local_L = accept_L
+            # 本轮草稿预测步数，不能超过剩余的层数
+            draft_steps = min(gamma, self.num_stages_minus_1 - accept_si)
+
+            ###### 备份当前状态（如果需要回退，可保存 target_f_hat、target_next_token_map 等） ######
+            # backup_target_f_hat = target_f_hat.clone()  # 示例
+
+            ######################################
+            # Step 1: 使用 draft_model 从当前层开始预测 draft_steps 层
+            ######################################
+            # 初始化 draft_next_token_map。如果处于 warmup 后首次进入，则用 target 的 token hub 投影到 draft 空间
+            if accept_si == warmup_steps:
+                # 注意：这里简单使用 word_embed 投影，实际可能需要专门的映射模块
+                draft_prefix = self.draft_model.word_embed(accept_token_hub)
+                draft_next_token_map = torch.cat([draft_first_token_map, draft_prefix], dim=1)
+            # 对于 CFG，扩充 batch size
+            draft_next_token_map = draft_next_token_map.repeat(2, 1, 1)
+
+            current_draft_token_hub = []
+            for si, pn in enumerate(self.patch_nums):
+                if si < accept_si:
+                    continue
+                # 当达到本轮最后一层时退出草稿生成
+                if si >= accept_si and si < accept_si + draft_steps:
+                    ratio = si / self.num_stages_minus_1
+                    x = draft_next_token_map
+                    # 如有需要，可为第一层设置注意力 mask
+                    attn_bias = None
+                    if si == accept_si:
+                        attn_bias = self.draft_model.attn_bias_for_masking[:, :, :self.exit_points[si], :self.exit_points[si]]
+                    for blk in self.draft_model.blocks:
+                        x = blk(x=x, cond_BD=draft_cond_BD_or_gss, attn_bias=attn_bias)
+                    logits = self.draft_model.get_logits(x, draft_cond_BD)
+                    t = cfg * ratio
+                    logits = (1 + t) * logits[:B] - t * logits[B:]
+                    idx = sample_with_top_k_top_p_(logits, rng=self.draft_model.rng, top_k=top_k, top_p=top_p, num_samples=1)[:, :, 0]
+                    if not more_smooth:
+                        h_BChw = self.draft_model.vae_quant_proxy[0].embedding(idx)
+                    else:
+                        gum_t = max(0.27 * (1 - ratio * 0.95), 0.005)
+                        h_BChw = gumbel_softmax_with_rng(
+                            logits.mul(1 + ratio), tau=gum_t, hard=False, dim=-1, rng=self.draft_model.rng
+                        ) @ self.draft_model.vae_quant_proxy[0].embedding.weight.unsqueeze(0)
+                    h_BChw = h_BChw.transpose(1, 2).reshape(B, self.draft_model.Cvae, pn, pn)
+                    draft_f_hat, draft_next_token_map = self.draft_model.vae_quant_proxy[0].get_next_autoregressive_input(
+                        si, len(self.patch_nums), draft_f_hat, h_BChw
+                    )
+                    token_map = draft_next_token_map.view(B, self.draft_model.Cvae, -1).transpose(1, 2)
+                    current_draft_token_hub.append(token_map)
+                    if si == accept_si + draft_steps - 1:
+                        break
+            if current_draft_token_hub:
+                draft_token_hub = torch.cat(current_draft_token_hub, dim=1)
+            else:
+                draft_token_hub = None
+
+            ######################################
+            # Step 2: 使用 target_model 验证草稿结果
+            ######################################
+            # 将 draft_model 输出投影到 target_model 空间
+            projected_tokens = self.target_model.word_embed(draft_token_hub)
+            # 依据 exit_points 得到当前草稿层结束时的位置索引
+            pindex = self.exit_points[accept_si + draft_steps - 1]
+            # 构造 target_model 后续输入（拼接初始 token 与草稿预测并加上位置编码）
+            target_next_token_map = torch.cat(
+                [target_first_token_map, projected_tokens + target_lvl_pos[:, 1:pindex]], dim=1
+            )
+
+            # 构造 block-wise attention mask（简化版）
+            L = target_next_token_map.shape[1]
+            d = torch.cat([torch.full((pn * pn,), i, device=target_next_token_map.device)
+                        for i, pn in enumerate(self.patch_nums)]).view(1, L, 1)
+            dT = d.transpose(1, 2)
+            attn_bias_for_masking = torch.where(d >= dT, 0., -torch.inf).reshape(1, 1, L, L)
+            for blk in self.target_model.blocks:
+                target_next_token_map = blk(x=target_next_token_map,
+                                            cond_BD=target_cond_BD_or_gss,
+                                            attn_bias=attn_bias_for_masking)
+
+            # 调用验证函数，测量草稿与 target_model 预测的相似性
+            # 此处 measure_similarity_with_target_parallel 为占位函数，返回 True 表示接受当前草稿
+            if True:
+                # 接受当前草稿，更新 accept_si 与累计 token 数
+                accepted_stage = accept_si + draft_steps - 1
+                pn = self.patch_nums[accepted_stage]
+                accept_si = accepted_stage + 1
+                accept_L += pn * pn
+                # 将验证通过的 token 加入已接受的 token hub
+                if accept_token_hub is None:
+                    accept_token_hub = draft_token_hub
+                else:
+                    accept_token_hub = torch.cat([accept_token_hub, draft_token_hub], dim=1)
+                # target_f_hat 也可以在这里更新（此处省略细节）
+            else:
+                # 如果验证未通过，则进行回退处理（此处仅作提示，具体策略需根据业务需求设计）
+                print("Verification failed at stage:", accept_si + draft_steps - 1)
+                # 可选择回退至 backup 状态或重新生成当前草稿
+                break
+
+        ######################################
+        # 关闭 KV cache
+        ######################################
+        for blk in self.draft_model.blocks:
+            blk.attn.kv_caching(False)
+        for blk in self.target_model.blocks:
+            blk.attn.kv_caching(False)
+
+        ######################################
+        # 最终利用 target_model 的 f_hat 生成图像
+        ######################################
+        final_img = self.target_model.vae_proxy[0].fhat_to_img(target_f_hat).add_(1).mul_(0.5)
+        return final_img
+
+
+
     torch.no_grad()
     def sdvar_autoregressive_infer_cfg_sd_tdt(
             self,
